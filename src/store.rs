@@ -45,7 +45,7 @@ pub struct ConfigxHealth {
 /// （[`reload`](Self::reload)、[`register_source`](Self::register_source)）都要求 `&mut self`。
 /// 这对应「单写多读」模型：读取可以并发，重载需要独占。
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```
 /// use configx::{ConfigxStore, MemorySource};

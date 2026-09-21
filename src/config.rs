@@ -22,7 +22,7 @@ fn default_allow_empty_snapshot() -> bool {
 /// 两个字段都带默认值，因此 TOML / 环境变量都可以只覆盖其中一部分。
 /// 字段本身不做语义推导，全部约束集中在 [`validate`](Self::validate)。
 ///
-/// # 示例
+/// # Examples
 ///
 /// ```
 /// use configx::ConfigxConfig;
