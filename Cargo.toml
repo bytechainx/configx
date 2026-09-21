@@ -11,10 +11,27 @@ documentation = "https://github.com/bytechainx/configx#readme"
 readme = "README.md"
 keywords = ["config", "configuration", "toml", "layered", "watch"]
 categories = ["config", "development-tools"]
-include = ["src/**/*", "tests/**/*", "examples/**/*", "README.md", "LICENSE-*", "Cargo.toml"]
+include = ["src/**/*", "tests/**/*", "examples/**/*", "benches/**/*", "docs/**/*", "README.md", "CHANGELOG.md", "CONTEXT.md", "CONTRIBUTING.md", "LICENSE-*", "Cargo.toml"]
 
 [dependencies]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+
+[[bench]]
+name = "hot_path"
+harness = false
+
+[lints.rust]
+private_interfaces = "deny"
+private_bounds = "deny"
+unused_must_use = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
