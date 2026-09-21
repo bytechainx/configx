@@ -7,7 +7,7 @@ description = "Layered configuration store: in-memory key-value snapshot, multi-
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bytechainx/configx"
 homepage = "https://github.com/bytechainx/configx"
-documentation = "https://docs.rs/configx"
+documentation = "https://github.com/bytechainx/configx#readme"
 readme = "README.md"
 keywords = ["config", "configuration", "toml", "layered", "watch"]
 categories = ["config", "development-tools"]
@@ -18,7 +18,3 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]

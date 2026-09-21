@@ -11,8 +11,11 @@
 
 ## 安装
 
-```bash
-cargo add configx
+本 crate **不发布到 crates.io**，通过 git 依赖引入：
+
+```toml
+[dependencies]
+configx = { git = "https://github.com/bytechainx/configx" }
 ```
 
 ## 最小可运行示例
