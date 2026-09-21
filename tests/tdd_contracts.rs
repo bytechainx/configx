@@ -17,7 +17,7 @@
 //! // TDD-PROBE: ConfigxStore::register_source | 变异：后注册源优先级反转 | 红=register_source_later_wins | 绿=register_source_later_wins
 //! // TDD-PROBE: ConfigxStore::reload | 变异：失败路径仍替换快照并推进 generation | 红=reload_is_atomic_and_failure_preserving | 绿=reload_is_atomic_and_failure_preserving
 //! // TDD-PROBE: ConfigxStore::ping | 变异：无已加载源时 ping 恒 Ok | 红=ping_requires_a_loaded_source | 绿=ping_requires_a_loaded_source
-//! // TDD-PROBE: ConfigWatch::wait_for_change | 变异：等待恒定返回 Changed | 红=config_watch_wait_reports_change_timeout_and_closed | 绿=config_watch_wait_reports_change_timeout_and_closed
+//! // TDD-PROBE: ConfigWatch::wait_timeout_outcome | 变异：等待恒定返回 Changed | 红=config_watch_wait_reports_change_timeout_and_closed | 绿=config_watch_wait_reports_change_timeout_and_closed
 //! // TDD-PROBE: redact_map | 变异：redact_map 返回原始映射 | 红=redact_map_masks_secret_prefixed_values | 绿=redact_map_masks_secret_prefixed_values
 //! // TDD-PROBE: is_secret_key | 变异：is_secret_key 取反 | 红=is_secret_key_is_prefix_based_and_case_sensitive | 绿=is_secret_key_is_prefix_based_and_case_sensitive
 
@@ -195,8 +195,8 @@ fn ping_requires_a_loaded_source() {
 
 /// `ConfigWatch` 的变更等待：显式区分「变更 / 超时 / 已关闭」，且无变更时不阻塞。
 ///
-/// 契约登记的入口名为 `ConfigWatch::wait_for_change`；本 crate 的实际形态是
-/// `ConfigWatch::subscribe` 返回 `ConfigSubscription`，由订阅句柄承担阻塞等待
+/// 契约登记的入口为 `ConfigWatch::wait_timeout_outcome`；本 crate 的实际形态是
+/// `ConfigWatch::subscribe` 返回 `ConfigSubscription`，由订阅句柄承担阻塞与限时等待
 /// （`wait_outcome` / `wait_timeout_outcome`），故此处按该形态断言等待语义。
 #[test]
 fn config_watch_wait_reports_change_timeout_and_closed() {
