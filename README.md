@@ -52,7 +52,6 @@ fn main() -> Result<(), configx::ConfigxError> {
 | 字段 / 环境变量 | 类型 | 默认值 | 说明 |
 | --------------- | ---- | ------ | ---- |
 | `redact_secrets`<br>`FOUNDATIONX_CONFIGX_REDACT_SECRETS` | `bool` | `true` | 是否在 `Debug`/日志路径上把 `secret:` 前缀键的值显示为 `***`；不影响 `get` 的返回值 |
-| `watch_channel_capacity`<br>`FOUNDATIONX_CONFIGX_WATCH_CHANNEL_CAPACITY` | `usize` | `64` | 变更通道容量，合法区间 `1..=65536`，超出即校验失败 |
 | `allow_empty_snapshot`<br>`FOUNDATIONX_CONFIGX_ALLOW_EMPTY_SNAPSHOT` | `bool` | `true` | 为 `false` 时，合并结果为空的 `reload` 返回 `ConfigxError::Conflict` 并保留旧快照 |
 
 布尔值接受 `1/0`、`true/false`、`yes/no`、`on/off`（忽略大小写）；环境变量只含空白时视为未设置。
@@ -62,13 +61,11 @@ use configx::ConfigxConfig;
 
 let config = ConfigxConfig::builder()
     .redact_secrets(true)
-    .watch_channel_capacity(16)
     .allow_empty_snapshot(false)
     .build()?;
 
 let from_toml = ConfigxConfig::from_toml(
     r#"
-    watch_channel_capacity = 16
     allow_empty_snapshot = false
     "#,
 )?;

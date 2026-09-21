@@ -61,8 +61,7 @@ mod view;
 mod watch;
 
 pub use config::{
-    ConfigxConfig, ConfigxConfigBuilder, DEFAULT_WATCH_CHANNEL_CAPACITY, ENV_ALLOW_EMPTY_SNAPSHOT,
-    ENV_REDACT_SECRETS, ENV_WATCH_CHANNEL_CAPACITY, MAX_WATCH_CHANNEL_CAPACITY,
+    ConfigxConfig, ConfigxConfigBuilder, ENV_ALLOW_EMPTY_SNAPSHOT, ENV_REDACT_SECRETS,
 };
 pub use diff::{diff_snapshots, ConfigDiff};
 pub use error::{ConfigxError, ConfigxResult, ErrorKind};
