@@ -14,8 +14,28 @@ use crate::secret::RedactedHashMap;
 ///
 /// 实现必须返回**完整快照**：调用方负责合并与覆盖策略，源本身不感知层序。
 /// 实现需要 `Send + Sync`，因为源会被存进可共享的存储中。
+///
+/// # 阻塞调用
+///
+/// 本 trait 为纯同步接口，不依赖任何异步运行时。`load()` 可能执行阻塞 I/O
+/// （如 [`FileSource`] 的 `std::fs::read_to_string`、或自定义实现的网络请求等）。
+/// **异步调用方（tokio 上下文）须用 `tokio::task::spawn_blocking` 隔离，否则会
+/// 冻结运行时工作线程。**
 pub trait ConfigSource: Send + Sync {
     /// 加载当前键值映射。
+    ///
+    /// # 阻塞调用
+    ///
+    /// 此方法可能执行阻塞 I/O（文件读取、网络请求等），仅限**同步上下文**调用。
+    /// 若必须在异步上下文中调用，请用 `tokio::task::spawn_blocking` 包装：
+    ///
+    /// ```ignore
+    /// # use configx::ConfigSource;
+    /// # fn example(source: impl ConfigSource) {
+    /// let handle = tokio::task::spawn_blocking(move || source.load());
+    /// let entries = handle.await??;
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -155,6 +175,11 @@ impl ConfigSource for EnvSource {
 /// 简单文件配置源：读取 `KEY=VALUE` 文本文件。
 ///
 /// 解析规则见 [`parse_key_value_file`]。
+///
+/// # 阻塞调用
+///
+/// `load()` 内部使用 `std::fs::read_to_string` 执行**阻塞文件 I/O**。
+/// 异步调用方须用 `tokio::task::spawn_blocking` 隔离，避免冻结 tokio worker。
 #[derive(Debug, Clone)]
 pub struct FileSource {
     path: PathBuf,
