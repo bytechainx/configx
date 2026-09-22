@@ -274,3 +274,303 @@ impl fmt::Debug for ConfigxStore {
         debug.finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+    use crate::watch::{ConfigChange, ConfigWaitOutcome};
+    use crate::{ErrorKind, MemorySource};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// 可在两次 `load` 之间切换行为的源，用于验证失败/空快照时的「状态保持」语义。
+    #[derive(Clone, Copy)]
+    enum Behavior {
+        Pairs(&'static [(&'static str, &'static str)]),
+        Empty,
+        Fail,
+    }
+
+    struct ScriptedSource {
+        behavior: Mutex<Behavior>,
+    }
+
+    impl ScriptedSource {
+        fn new(behavior: Behavior) -> Self {
+            Self {
+                behavior: Mutex::new(behavior),
+            }
+        }
+
+        fn set(&self, behavior: Behavior) {
+            *self
+                .behavior
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = behavior;
+        }
+    }
+
+    impl ConfigSource for ScriptedSource {
+        fn load(&self) -> ConfigxResult<HashMap<String, String>> {
+            let behavior = *self
+                .behavior
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match behavior {
+                Behavior::Pairs(pairs) => Ok(pairs
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                    .collect()),
+                Behavior::Empty => Ok(HashMap::new()),
+                Behavior::Fail => Err(ConfigxError::unavailable("测试源暂不可用")),
+            }
+        }
+    }
+
+    fn store_with(pairs: &[(&str, &str)]) -> ConfigxStore {
+        let mut store = ConfigxStore::new();
+        store.register_source(MemorySource::from_pairs(pairs.iter().copied()));
+        store.reload().expect("reload 必须成功");
+        store
+    }
+
+    #[test]
+    fn new_store_is_empty_and_unhealthy() {
+        let store = ConfigxStore::new();
+        assert_eq!(store.source_count(), 0);
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+        assert_eq!(store.get("a"), None);
+        assert!(!store.contains_key("a"));
+        assert_eq!(store.generation(), 0);
+        assert_eq!(store.config(), &ConfigxConfig::default());
+        assert_eq!(ConfigxStore::default().len(), store.len());
+
+        let health = store.health_check().expect("health_check 不产生错误");
+        assert_eq!(health.sources, 0);
+        assert_eq!(health.keys, 0);
+        assert!(!health.healthy);
+
+        let error = store.ping().expect_err("无源必须不健康");
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn from_config_keeps_the_given_config() {
+        let config = ConfigxConfig::builder()
+            .redact_secrets(false)
+            .allow_empty_snapshot(false)
+            .build()
+            .expect("构建成功");
+        let store = ConfigxStore::from_config(config.clone()).expect("from_config 成功");
+        assert_eq!(store.config(), &config);
+    }
+
+    #[test]
+    fn later_registered_source_overrides_earlier_one() {
+        let mut store = ConfigxStore::new();
+        store.register_source(MemorySource::from_pairs([("a", "1"), ("b", "1")]));
+        store.register_source(MemorySource::from_pairs([("b", "2")]));
+        store.reload().expect("reload 成功");
+
+        assert_eq!(store.source_count(), 2);
+        assert_eq!(store.get("a"), Some("1"));
+        assert_eq!(store.get("b"), Some("2"), "后注册者覆盖");
+        assert!(store.contains_key("a"));
+        assert_eq!(store.len(), 2);
+    }
+
+    #[test]
+    fn with_source_does_not_load_until_reload() {
+        let store = ConfigxStore::new().with_source(MemorySource::from_pairs([("a", "1")]));
+        assert_eq!(store.source_count(), 1);
+        assert_eq!(store.len(), 0, "with_source 只注册，不加载");
+        assert!(!store.health_check().expect("health").healthy);
+    }
+
+    #[test]
+    fn snapshot_is_stable_across_reload() {
+        let mut store = store_with(&[("a", "1")]);
+        let before = store.snapshot();
+        store.register_source(MemorySource::from_pairs([("a", "2")]));
+        store.reload().expect("reload 成功");
+
+        assert_eq!(
+            before.get("a").map(String::as_str),
+            Some("1"),
+            "已取得的快照不可变"
+        );
+        assert_eq!(store.get("a"), Some("2"));
+    }
+
+    #[test]
+    fn reload_failure_keeps_previous_snapshot_and_generation() {
+        let source = Arc::new(ScriptedSource::new(Behavior::Pairs(&[("a", "1")])));
+        let mut store = ConfigxStore::new();
+        store.register_shared_source(source.clone());
+        store.reload().expect("首次加载成功");
+        let generation = store.generation();
+        assert_eq!(store.get("a"), Some("1"));
+
+        source.set(Behavior::Fail);
+        let error = store.reload().expect_err("源失败必须报错");
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert_eq!(store.get("a"), Some("1"), "失败不得改动快照");
+        assert_eq!(store.generation(), generation, "失败不得推进 generation");
+    }
+
+    #[test]
+    fn reload_rejects_empty_snapshot_and_keeps_previous() {
+        let config = ConfigxConfig::builder()
+            .allow_empty_snapshot(false)
+            .build()
+            .expect("构建成功");
+        let source = Arc::new(ScriptedSource::new(Behavior::Pairs(&[("a", "1")])));
+        let mut store = ConfigxStore::from_config(config).expect("from_config 成功");
+        store.register_shared_source(source.clone());
+        store.reload().expect("非空快照允许");
+        let generation = store.generation();
+
+        source.set(Behavior::Empty);
+        let error = store.reload().expect_err("空快照必须被拒绝");
+        assert_eq!(error.kind(), ErrorKind::Conflict);
+        assert_eq!(store.get("a"), Some("1"), "拒绝后旧快照保留");
+        assert_eq!(store.generation(), generation);
+    }
+
+    #[test]
+    fn reload_allows_empty_snapshot_by_default_and_stays_healthy() {
+        let source = Arc::new(ScriptedSource::new(Behavior::Pairs(&[("a", "1")])));
+        let mut store = ConfigxStore::new();
+        store.register_shared_source(source.clone());
+        store.reload().expect("首次加载成功");
+
+        source.set(Behavior::Empty);
+        store.reload().expect("默认允许空快照");
+        assert!(store.is_empty());
+        let health = store.health_check().expect("health");
+        assert_eq!(health.sources, 1, "源已成功加载，与键数量无关");
+        assert_eq!(health.keys, 0);
+        assert!(health.healthy);
+        store.ping().expect("健康源必须 ping 通");
+    }
+
+    #[test]
+    fn ping_recovers_after_successful_reload() {
+        let mut store = ConfigxStore::new();
+        store.register_source(MemorySource::new());
+        store.ping().expect_err("已注册但未加载仍视为不健康");
+        store.reload().expect("reload 成功");
+        store.ping().expect("reload 之后恢复健康");
+        assert_eq!(store.health_check().expect("health").sources, 1);
+    }
+
+    #[test]
+    fn get_typed_parses_json_then_falls_back_to_string_literal() {
+        let store = store_with(&[
+            ("num", "8080"),
+            ("flag", "true"),
+            ("list", r#"["a","b"]"#),
+            ("host", "db.local"),
+            ("quoted", r#""trimmed""#),
+        ]);
+
+        assert_eq!(store.get_typed::<u16>("num").expect("JSON 数字"), 8080);
+        assert!(store.get_typed::<bool>("flag").expect("JSON 布尔"));
+        assert_eq!(
+            store.get_typed::<Vec<String>>("list").expect("JSON 数组"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // 非 JSON 文本按「字符串字面量」二次解析。
+        assert_eq!(
+            store.get_typed::<String>("host").expect("字符串回落"),
+            "db.local"
+        );
+        // 数字文本转 String 也走回落分支。
+        assert_eq!(store.get_typed::<String>("num").expect("数字回落"), "8080");
+        assert_eq!(
+            store.get_typed::<String>("quoted").expect("JSON 字符串"),
+            "trimmed"
+        );
+    }
+
+    #[test]
+    fn get_typed_reports_missing_and_type_mismatch_without_leaking_values() {
+        let store = store_with(&[("host", "db.local")]);
+
+        let missing = store
+            .get_typed::<u16>("absent")
+            .expect_err("缺失键必须报错");
+        assert_eq!(missing.kind(), ErrorKind::Missing);
+
+        let mismatch = store
+            .get_typed::<u16>("host")
+            .expect_err("类型不匹配必须报错");
+        assert_eq!(mismatch.kind(), ErrorKind::TypeMismatch);
+        let rendered = mismatch.to_string();
+        assert!(rendered.contains("host"), "应报告键名：{rendered}");
+        assert!(!rendered.contains("db.local"), "不得回显配置值：{rendered}");
+    }
+
+    #[test]
+    fn reload_advances_generation_and_wakes_subscribers() {
+        let mut store = ConfigxStore::new();
+        let mut subscription = store.watch();
+        assert_eq!(subscription.seen(), 0);
+
+        store.register_source(MemorySource::from_pairs([("a", "1")]));
+        store.reload().expect("reload 成功");
+        assert_eq!(store.generation(), 1);
+        assert_eq!(
+            subscription
+                .wait_timeout_outcome(Duration::from_millis(50))
+                .expect("等待成功"),
+            ConfigWaitOutcome::Changed(ConfigChange { generation: 1 })
+        );
+
+        // subscribe 别名与 notifier 指向同一条总线。
+        let mut alias = store.subscribe();
+        assert_eq!(alias.seen(), 1);
+        store.notifier().notify().expect("手动通知成功");
+        assert_eq!(store.generation(), 2);
+        assert_eq!(
+            alias
+                .wait_timeout_outcome(Duration::from_millis(50))
+                .expect("等待成功"),
+            ConfigWaitOutcome::Changed(ConfigChange { generation: 2 })
+        );
+    }
+
+    #[test]
+    fn debug_redacts_entries_by_default() {
+        let store = store_with(&[("plain", "visible"), ("secret:token", "top-secret")]);
+        let rendered = format!("{store:?}");
+        assert!(rendered.contains("***"), "默认必须脱敏：{rendered}");
+        assert!(!rendered.contains("top-secret"), "{rendered}");
+        assert!(rendered.contains("visible"), "非敏感值保持可读：{rendered}");
+    }
+
+    #[test]
+    fn debug_can_show_raw_values_when_redaction_disabled() {
+        let config = ConfigxConfig::builder()
+            .redact_secrets(false)
+            .build()
+            .expect("构建成功");
+        let mut store = ConfigxStore::from_config(config).expect("from_config 成功");
+        store.register_source(MemorySource::from_pairs([("secret:token", "top-secret")]));
+        store.reload().expect("reload 成功");
+        assert!(
+            format!("{store:?}").contains("top-secret"),
+            "关闭脱敏后 Debug 输出原始值"
+        );
+    }
+}

@@ -29,7 +29,7 @@ pub enum ErrorKind {
 /// # 错误消息与敏感数据
 ///
 /// 所有变体的消息都不得回显配置值：类型转换失败只报告键名与目标类型名，
-/// TOML 解析失败只报告 `toml` 的错误摘要（不含源码片段），
+/// TOML 解析失败只报告位置（第 N 行第 M 列，不含配置值与源码片段），
 /// `KEY=VALUE` 解析失败只报告行号。这样才能安全地把错误写入日志。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -147,3 +147,117 @@ impl ConfigxError {
 
 /// crate 专用 `Result` 别名。
 pub type ConfigxResult<T> = Result<T, ConfigxError>;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+
+    #[test]
+    fn constructors_map_to_expected_kinds() {
+        assert_eq!(ConfigxError::invalid("x").kind(), ErrorKind::Invalid);
+        assert_eq!(ConfigxError::missing("x").kind(), ErrorKind::Missing);
+        assert_eq!(
+            ConfigxError::type_mismatch("x").kind(),
+            ErrorKind::TypeMismatch
+        );
+        assert_eq!(ConfigxError::conflict("x").kind(), ErrorKind::Conflict);
+        assert_eq!(ConfigxError::parse("x").kind(), ErrorKind::Parse);
+        assert_eq!(
+            ConfigxError::unsupported("x").kind(),
+            ErrorKind::Unsupported
+        );
+        assert_eq!(
+            ConfigxError::unavailable("x").kind(),
+            ErrorKind::Unavailable
+        );
+    }
+
+    #[test]
+    fn io_error_is_invalid_kind_and_keeps_source() {
+        let io = ConfigxError::io(
+            "读取配置文件失败：路径=/tmp/x",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+        );
+        assert_eq!(
+            io.kind(),
+            ErrorKind::Invalid,
+            "文件缺失需人工修复，不可重试"
+        );
+        let source = std::error::Error::source(&io).expect("必须保留底层 I/O 错误");
+        assert_eq!(source.to_string(), "gone");
+    }
+
+    #[test]
+    fn only_unavailable_is_retryable() {
+        let retryable = [
+            ConfigxError::invalid("x"),
+            ConfigxError::missing("x"),
+            ConfigxError::type_mismatch("x"),
+            ConfigxError::conflict("x"),
+            ConfigxError::parse("x"),
+            ConfigxError::unsupported("x"),
+            ConfigxError::io("x", std::io::Error::other("boom")),
+        ];
+        for error in retryable {
+            assert!(!error.is_retryable(), "{error} 不应被判为可重试");
+        }
+        assert!(ConfigxError::unavailable("x").is_retryable());
+    }
+
+    #[test]
+    fn display_uses_stable_chinese_prefixes() {
+        assert_eq!(ConfigxError::invalid("原因").to_string(), "配置无效: 原因");
+        assert_eq!(ConfigxError::missing("原因").to_string(), "缺失配置: 原因");
+        assert_eq!(
+            ConfigxError::type_mismatch("原因").to_string(),
+            "类型不匹配: 原因"
+        );
+        assert_eq!(ConfigxError::conflict("原因").to_string(), "状态冲突: 原因");
+        assert_eq!(ConfigxError::parse("原因").to_string(), "解析失败: 原因");
+        assert_eq!(
+            ConfigxError::unsupported("原因").to_string(),
+            "不支持的操作: 原因"
+        );
+        assert_eq!(
+            ConfigxError::unavailable("原因").to_string(),
+            "配置源暂不可用: 原因"
+        );
+        assert_eq!(
+            ConfigxError::io("路径=/tmp/x", std::io::Error::other("boom")).to_string(),
+            "I/O 失败: 路径=/tmp/x"
+        );
+    }
+
+    #[test]
+    fn kind_is_deterministic_for_all_variants() {
+        // 逐变体确认 kind() 覆盖完整：不依赖 ErrorKind 的派生顺序。
+        let pairs = [
+            (ConfigxError::Invalid(String::new()), ErrorKind::Invalid),
+            (ConfigxError::Missing(String::new()), ErrorKind::Missing),
+            (
+                ConfigxError::TypeMismatch(String::new()),
+                ErrorKind::TypeMismatch,
+            ),
+            (ConfigxError::Conflict(String::new()), ErrorKind::Conflict),
+            (ConfigxError::Parse(String::new()), ErrorKind::Parse),
+            (
+                ConfigxError::Unsupported(String::new()),
+                ErrorKind::Unsupported,
+            ),
+            (
+                ConfigxError::Unavailable(String::new()),
+                ErrorKind::Unavailable,
+            ),
+        ];
+        for (error, expected) in pairs {
+            assert_eq!(error.kind(), expected);
+        }
+    }
+}

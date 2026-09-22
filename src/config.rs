@@ -83,13 +83,18 @@ impl ConfigxConfig {
     ///
     /// 未出现的字段使用各自默认值；未知字段被忽略（向前兼容）。
     ///
+    /// # 错误消息
+    ///
+    /// 解析失败的消息**只报告位置**（第 N 行第 M 列）与固定类别文本，
+    /// **不含**配置值字节，也不渲染源码片段——见 [`ConfigxError`] 顶部的脱敏约定。
+    ///
     /// # Errors
     ///
     /// TOML 语法/类型错误返回 [`ConfigxError::Parse`]；解析成功但未通过
     /// [`validate`](Self::validate) 时返回 [`ConfigxError::Invalid`]。
     pub fn from_toml(text: &str) -> ConfigxResult<Self> {
         let config: Self = toml::from_str(text)
-            .map_err(|error| ConfigxError::parse(format!("TOML 解析失败：{}", error.message())))?;
+            .map_err(|error| ConfigxError::parse(describe_toml_failure(text, &error)))?;
         config.validate()?;
         Ok(config)
     }
@@ -161,6 +166,38 @@ impl ConfigxConfigBuilder {
     }
 }
 
+/// 把 `toml` 的解析失败压成**不含配置值**的摘要。
+///
+/// 不能直接透传 `toml::de::Error` 的文本：`message()` 会把非法值内联进消息
+/// （实测 `invalid type: string "…", expected a boolean`），`Display` 还会额外渲染
+/// 源码行。两者都违反 [`ConfigxError`] 的「所有变体的消息都不得回显配置值」。
+/// 这里只保留**位置**（由 `span()` 换算的行/列），其余一概不输出。
+fn describe_toml_failure(text: &str, error: &toml::de::Error) -> String {
+    match error.span() {
+        Some(span) => {
+            let (line, column) = line_and_column(text, span.start);
+            format!("TOML 解析失败：第 {line} 行第 {column} 列")
+        }
+        None => "TOML 解析失败：文档格式不合法".to_string(),
+    }
+}
+
+/// 把字节偏移换算成 1-based 的（行号，列号）；列按字符计数。
+///
+/// 偏移可能落在多字节字符内部（或被越界传入），一律向前退到字符边界，
+/// 保证切片安全。
+fn line_and_column(text: &str, byte_offset: usize) -> (usize, usize) {
+    let mut offset = byte_offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &text[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let column = text[line_start..offset].chars().count() + 1;
+    (line, column)
+}
+
 /// 读取环境变量；未设置或仅含空白时返回 `None`。
 fn read_env(name: &str) -> ConfigxResult<Option<String>> {
     match env::var(name) {
@@ -187,5 +224,193 @@ fn parse_bool(name: &str, value: &str) -> ConfigxResult<bool> {
         _ => Err(ConfigxError::invalid(format!(
             "环境变量 {name} 不是合法布尔值：期望 true/false、yes/no、on/off 或 1/0"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+    use crate::ErrorKind;
+
+    #[test]
+    fn defaults_enable_redaction_and_empty_snapshots() {
+        let config = ConfigxConfig::default();
+        assert!(config.redact_secrets);
+        assert!(config.allow_empty_snapshot);
+        config.validate().expect("默认配置必须通过校验");
+    }
+
+    #[test]
+    fn builder_starts_from_defaults_and_overrides_fields() {
+        let built = ConfigxConfigBuilder::new().build().expect("构建成功");
+        assert_eq!(built, ConfigxConfig::default());
+        assert_eq!(
+            ConfigxConfig::builder().build().expect("构建成功"),
+            ConfigxConfig::default(),
+            "builder() 与 new() 起点一致"
+        );
+
+        let overridden = ConfigxConfig::builder()
+            .redact_secrets(false)
+            .allow_empty_snapshot(false)
+            .build()
+            .expect("构建成功");
+        assert!(!overridden.redact_secrets);
+        assert!(!overridden.allow_empty_snapshot);
+    }
+
+    #[test]
+    fn validate_accepts_every_boolean_combination() {
+        // 两个字段均为布尔量，不存在可被拒绝的取值。
+        for redact in [true, false] {
+            for allow in [true, false] {
+                let config = ConfigxConfig::builder()
+                    .redact_secrets(redact)
+                    .allow_empty_snapshot(allow)
+                    .build()
+                    .expect("布尔字段无取值约束");
+                assert_eq!(config.redact_secrets, redact);
+                assert_eq!(config.allow_empty_snapshot, allow);
+                config.validate().expect("恒为通过");
+            }
+        }
+    }
+
+    #[test]
+    fn from_toml_uses_per_field_defaults() {
+        let partial = ConfigxConfig::from_toml("redact_secrets = false\n").expect("解析成功");
+        assert!(!partial.redact_secrets);
+        assert!(partial.allow_empty_snapshot, "未出现的字段回落到默认值");
+
+        assert_eq!(
+            ConfigxConfig::from_toml("").expect("空文本解析成功"),
+            ConfigxConfig::default()
+        );
+
+        let full =
+            ConfigxConfig::from_toml("redact_secrets = false\nallow_empty_snapshot = false\n")
+                .expect("解析成功");
+        assert_eq!(
+            full,
+            ConfigxConfig::builder()
+                .redact_secrets(false)
+                .allow_empty_snapshot(false)
+                .build()
+                .expect("构建成功")
+        );
+    }
+
+    #[test]
+    fn from_toml_classifies_syntax_and_type_errors_as_parse() {
+        for text in ["redact_secrets = ", "redact_secrets = \"yes\"", "= 1"] {
+            let error = ConfigxConfig::from_toml(text).expect_err("必须报解析失败");
+            assert_eq!(error.kind(), ErrorKind::Parse, "文本：{text:?}");
+            assert!(error.to_string().starts_with("解析失败: "), "{error}");
+        }
+    }
+
+    #[test]
+    fn from_toml_parse_error_reports_position_without_value_or_source() {
+        // 契约（`src/error.rs` 顶部文档）：解析失败的消息**不得回显配置值**，
+        // 也不得渲染源码片段；只保留位置。
+        let probe = "MARKER_LEAK_PROBE";
+        let error = ConfigxConfig::from_toml(&format!("redact_secrets = \"{probe}\"\n"))
+            .expect_err("类型错误必须报错");
+        assert_eq!(error.kind(), ErrorKind::Parse);
+        let rendered = error.to_string();
+        assert!(!rendered.contains(probe), "不得回显配置值：{rendered}");
+        assert!(
+            !rendered.contains("redact_secrets ="),
+            "不得回显源码行：{rendered}"
+        );
+        assert!(!rendered.contains(" |"), "不得渲染行号块：{rendered}");
+        assert!(rendered.contains("第 1 行"), "应保留位置信息：{rendered}");
+    }
+
+    #[test]
+    fn syntax_error_also_omits_value_and_reports_position() {
+        // 语法错误（缺值）走同一条映射：同样不带值、不渲染片段。
+        let error = ConfigxConfig::from_toml("redact_secrets = \n").expect_err("语法错误必须报错");
+        assert_eq!(error.kind(), ErrorKind::Parse);
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("解析失败: TOML 解析失败："),
+            "{rendered}"
+        );
+        assert!(rendered.contains("第 1 行"), "应保留位置信息：{rendered}");
+    }
+
+    #[test]
+    fn line_and_column_maps_offsets_to_1_based_positions() {
+        let text = "a\nbb\nccc\n";
+        assert_eq!(line_and_column(text, 0), (1, 1));
+        assert_eq!(line_and_column(text, 2), (2, 1));
+        assert_eq!(line_and_column(text, 5), (3, 1));
+        assert_eq!(line_and_column(text, 8), (3, 4), "第三行末尾（换行符前）");
+        assert_eq!(line_and_column(text, 9), (4, 1), "文本末尾之后");
+
+        // 列按字符计数，而不是字节。
+        assert_eq!(line_and_column("中=1", 3), (1, 2));
+        // 偏移落在多字节字符内部或越界时，安全退到字符边界。
+        assert_eq!(line_and_column("中", 1), (1, 1));
+        assert_eq!(line_and_column("中", 99), (1, 2));
+    }
+
+    #[test]
+    fn parse_bool_accepts_documented_aliases_case_insensitively() {
+        for value in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
+            assert!(
+                parse_bool(ENV_REDACT_SECRETS, value).expect("真值别名"),
+                "{value}"
+            );
+        }
+        for value in ["0", "false", "FALSE", "False", "no", "NO", "off", "OFF"] {
+            assert!(
+                !parse_bool(ENV_REDACT_SECRETS, value).expect("假值别名"),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bool_rejects_unknown_values_without_echoing_them() {
+        // 注意不要用 `tru` 这类与错误消息内提示词（true/false/yes/no/on/off）重叠的值，
+        // 否则「不得回显」的断言会把提示词本身当成回显。
+        for value in ["maybe", "2", "", "enabled", " yes"] {
+            let error = parse_bool(ENV_REDACT_SECRETS, value).expect_err("非法布尔值必须报错");
+            assert_eq!(error.kind(), ErrorKind::Invalid, "值：{value:?}");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(ENV_REDACT_SECRETS),
+                "应报告变量名：{rendered}"
+            );
+            if !value.is_empty() {
+                assert!(!rendered.contains(value), "不得回显原始值：{rendered}");
+            }
+        }
+    }
+
+    #[test]
+    fn read_env_treats_absent_and_blank_as_unset() {
+        // 测试专属变量名，避免与其它用例或真实环境竞争。
+        const PROBE: &str = "CONFIGX_TEST_READ_ENV_PROBE";
+        std::env::remove_var(PROBE);
+        assert!(read_env(PROBE).expect("未设置不是错误").is_none());
+
+        std::env::set_var(PROBE, "   \t ");
+        assert!(read_env(PROBE).expect("仅空白视为未设置").is_none());
+
+        std::env::set_var(PROBE, "  value  ");
+        assert_eq!(read_env(PROBE).expect("读取成功").as_deref(), Some("value"));
+
+        std::env::remove_var(PROBE);
+        assert!(read_env(PROBE).expect("清理后未设置").is_none());
     }
 }

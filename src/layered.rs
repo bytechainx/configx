@@ -81,3 +81,119 @@ impl fmt::Debug for LayeredConfig {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+    use crate::error::ConfigxError;
+    use crate::{ErrorKind, MemorySource};
+    use std::collections::HashMap;
+
+    fn memory(pairs: &[(&str, &str)]) -> Arc<dyn ConfigSource> {
+        Arc::new(MemorySource::from_pairs(pairs.iter().copied()))
+    }
+
+    /// 返回固定映射的源，用于构造「键非法」这类真实源难以表达的场景。
+    struct RawSource(HashMap<String, String>);
+
+    impl ConfigSource for RawSource {
+        fn load(&self) -> ConfigxResult<HashMap<String, String>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// 恒定失败的源，用于验证「任一层失败即整体失败」。
+    struct FailingSource;
+
+    impl ConfigSource for FailingSource {
+        fn load(&self) -> ConfigxResult<HashMap<String, String>> {
+            Err(ConfigxError::unavailable("测试源暂不可用"))
+        }
+    }
+
+    #[test]
+    fn empty_config_has_no_layers_and_merges_to_empty() {
+        let layered = LayeredConfig::new();
+        assert!(layered.is_empty());
+        assert_eq!(layered.len(), 0);
+        assert!(layered.load_merged().expect("空层合并必须成功").is_empty());
+        assert_eq!(format!("{layered:?}"), "LayeredConfig { layers: 0 }");
+    }
+
+    #[test]
+    fn later_sources_override_earlier_ones() {
+        let layered = LayeredConfig::new()
+            .with_source(memory(&[("a", "1"), ("b", "1")]))
+            .with_source(memory(&[("b", "2"), ("c", "2")]));
+        assert_eq!(layered.len(), 2);
+        assert!(!layered.is_empty());
+
+        let merged = layered.load_merged().expect("合并必须成功");
+        assert_eq!(
+            merged.get("a").map(String::as_str),
+            Some("1"),
+            "先注册独有的键保留"
+        );
+        assert_eq!(
+            merged.get("b").map(String::as_str),
+            Some("2"),
+            "同键后注册者覆盖"
+        );
+        assert_eq!(merged.get("c").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn push_and_with_source_build_the_same_layers() {
+        let mut pushed = LayeredConfig::new();
+        pushed.push(memory(&[("k", "v")]));
+        let chained = LayeredConfig::new().with_source(memory(&[("k", "v")]));
+
+        assert_eq!(pushed.len(), chained.len());
+        assert_eq!(
+            pushed.load_merged().expect("合并且成功"),
+            chained.load_merged().expect("合并且成功")
+        );
+    }
+
+    #[test]
+    fn invalid_key_from_any_layer_fails_the_whole_merge() {
+        let layered = LayeredConfig::new()
+            .with_source(memory(&[("good", "1")]))
+            .with_source(Arc::new(RawSource(HashMap::from([(
+                "bad\nkey".to_string(),
+                "2".to_string(),
+            )]))));
+        let error = layered.load_merged().expect_err("非法键必须整体失败");
+        assert_eq!(error.kind(), ErrorKind::Invalid);
+    }
+
+    #[test]
+    fn a_failing_source_aborts_without_partial_result() {
+        let layered = LayeredConfig::new()
+            .with_source(memory(&[("first", "1")]))
+            .with_source(Arc::new(FailingSource));
+        let error = layered.load_merged().expect_err("源失败必须整体失败");
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(error.is_retryable());
+    }
+
+    #[test]
+    fn debug_reports_only_the_layer_count() {
+        let layered = LayeredConfig::new()
+            .with_source(memory(&[("secret:token", "top-secret")]))
+            .with_source(memory(&[("b", "2")]));
+        let rendered = format!("{layered:?}");
+        assert_eq!(rendered, "LayeredConfig { layers: 2 }");
+        assert!(
+            !rendered.contains("top-secret"),
+            "不得展开任何值：{rendered}"
+        );
+    }
+}

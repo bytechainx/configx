@@ -151,8 +151,19 @@ fn error_messages_never_echo_values() {
         parse
     );
 
+    // TOML 路径同样不得回显值。此前这里只断言 kind()，把「不回显」本身漏掉了——
+    // 该路径恰恰会把非法值内联进 serde 错误文本（覆盖缺口，见本文件头 AIDD 表最后一行）。
     let toml = ConfigxConfig::from_toml("redact_secrets = \"top-secret-value\"").unwrap_err();
     assert_eq!(toml.kind(), ErrorKind::Parse);
+    let rendered = toml.to_string();
+    assert!(
+        !rendered.contains("top-secret-value"),
+        "TOML 解析失败不得回显配置值：{rendered}"
+    );
+    assert!(
+        !rendered.contains("redact_secrets ="),
+        "TOML 解析失败不得回显源码行：{rendered}"
+    );
 
     // Debug 展示路径同样脱敏。
     assert!(!format!("{store:?}").contains("top-secret-value"));

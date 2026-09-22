@@ -80,3 +80,100 @@ impl fmt::Debug for RedactedHashMap<'_> {
         fmt_redacted(f, self.0.iter())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+
+    #[test]
+    fn secret_prefix_is_the_only_signal_and_is_case_sensitive() {
+        assert_eq!(SECRET_KEY_PREFIX, "secret:");
+        assert!(is_secret_key("secret:"));
+        assert!(is_secret_key("secret:token"));
+        assert!(!is_secret_key("secret"));
+        assert!(!is_secret_key("Secret:token"), "判定大小写敏感");
+        assert!(!is_secret_key("password"), "不猜测词形，避免误判");
+        assert!(!is_secret_key(""));
+    }
+
+    #[test]
+    fn redact_value_only_replaces_secret_keys() {
+        assert_eq!(redact_value("secret:token", "abc"), REDACTED_VALUE);
+        assert_eq!(redact_value("plain", "abc"), "abc");
+
+        // 不产生分配：非敏感值返回入参引用本身。
+        let owned = String::from("value");
+        let borrowed = redact_value("plain", &owned);
+        assert!(
+            std::ptr::eq(borrowed, owned.as_str()),
+            "非敏感键必须原样返回入参引用"
+        );
+
+        // 敏感值返回 `REDACTED_VALUE` 常量：位置与入参不同，内容等于脱敏占位。
+        let redacted = redact_value("secret:token", &owned);
+        assert_eq!(redacted, REDACTED_VALUE);
+        assert!(
+            !std::ptr::eq(redacted.as_ptr(), owned.as_ptr()),
+            "敏感键不得返回入参引用"
+        );
+    }
+
+    #[test]
+    fn redact_map_copies_and_keeps_original_intact() {
+        let mut entries = BTreeMap::new();
+        entries.insert("plain".to_string(), "visible".to_string());
+        entries.insert("secret:token".to_string(), "hidden".to_string());
+
+        let redacted = redact_map(&entries);
+        assert_eq!(redacted.get("plain").map(String::as_str), Some("visible"));
+        assert_eq!(
+            redacted.get("secret:token").map(String::as_str),
+            Some(REDACTED_VALUE)
+        );
+        assert_eq!(
+            entries.get("secret:token").map(String::as_str),
+            Some("hidden"),
+            "原映射不得被修改"
+        );
+    }
+
+    #[test]
+    fn redacted_entries_debug_sorts_keys_and_masks_secrets() {
+        let mut entries = BTreeMap::new();
+        entries.insert("z".to_string(), "1".to_string());
+        entries.insert("a".to_string(), "2".to_string());
+        entries.insert("secret:token".to_string(), "hidden".to_string());
+
+        let rendered = format!("{:?}", RedactedEntries(&entries));
+        assert_eq!(
+            rendered, r#"{"a": "2", "secret:token": "***", "z": "1"}"#,
+            "Debug 必须按键升序且遮蔽敏感值"
+        );
+        assert!(
+            !rendered.contains("hidden"),
+            "不得泄漏原始敏感值：{rendered}"
+        );
+    }
+
+    #[test]
+    fn redacted_hashmap_debug_is_sorted_regardless_of_insert_order() {
+        // HashMap 迭代顺序不确定，fmt_redacted 必须显式排序，否则日志不可比。
+        let mut entries = HashMap::new();
+        entries.insert("b".to_string(), "2".to_string());
+        entries.insert("a".to_string(), "1".to_string());
+        entries.insert("secret:k".to_string(), "v".to_string());
+
+        let rendered = format!("{:?}", RedactedHashMap(&entries));
+        assert_eq!(
+            rendered, r#"{"a": "1", "b": "2", "secret:k": "***"}"#,
+            "Debug 必须按键升序且遮蔽敏感值"
+        );
+    }
+}

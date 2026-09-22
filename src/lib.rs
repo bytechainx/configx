@@ -75,3 +75,70 @@ pub use source::{parse_key_value_file, ConfigSource, EnvSource, FileSource, Memo
 pub use store::{ConfigxHealth, ConfigxStore};
 pub use view::{snapshots_agree, subset_snapshot, try_subset_snapshot};
 pub use watch::{ConfigChange, ConfigSubscription, ConfigWaitOutcome, ConfigWatch};
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    #[test]
+    fn public_reexports_compose_through_the_crate_root() {
+        // 顶层再导出必须可用：以 crate 根路径组装一次最小工作流（不触碰进程环境）。
+        let mut store = crate::ConfigxStore::new();
+        store.register_source(crate::MemorySource::from_pairs([
+            ("app.port", "5432"),
+            ("secret:token", "top-secret"),
+        ]));
+        store.reload().expect("reload 成功");
+
+        assert_eq!(store.get("app.port"), Some("5432"));
+        assert_eq!(store.get_typed::<u16>("app.port").expect("类型读取"), 5432);
+        store.ping().expect("已加载源必须健康");
+
+        let subset = crate::try_subset_snapshot(&store, &["app.port"]).expect("子集合法");
+        assert!(crate::subset_snapshot(&store, &["app.port"]).contains_key("app.port"));
+        assert!(crate::snapshots_agree(
+            &subset,
+            &store.snapshot(),
+            &["app.port"]
+        ));
+        assert!(
+            !crate::diff_snapshots(&subset, &store.snapshot()).is_empty(),
+            "子集相对完整快照在被排除的键上应有差异"
+        );
+        let full = crate::subset_snapshot(&store, &["app.port", "secret:token"]);
+        assert!(
+            crate::diff_snapshots(&full, &store.snapshot()).is_empty(),
+            "覆盖全部键时差异必须为空"
+        );
+
+        assert_eq!(
+            crate::redact_value("secret:token", "v"),
+            crate::REDACTED_VALUE
+        );
+        assert!(crate::is_secret_key(crate::SECRET_KEY_PREFIX));
+        assert_eq!(
+            crate::ErrorKind::Invalid,
+            crate::ConfigxError::invalid("x").kind()
+        );
+        assert!(crate::parse_key_value_file("A=1\n")
+            .expect("解析成功")
+            .contains_key("A"));
+        assert_eq!(
+            crate::ConfigxConfig::default(),
+            crate::ConfigxConfig::builder().build().expect("构建成功")
+        );
+
+        // 类型别名与其余公开类型可从根路径命名。
+        let _: crate::ConfigxResult<()> = Ok(());
+        let _: crate::ConfigDiff = crate::ConfigDiff::default();
+        let _: crate::LayeredConfig = crate::LayeredConfig::new();
+        let _: crate::ConfigxHealth = store.health_check().expect("health_check 不报错");
+        let _: crate::ConfigChange = crate::ConfigChange { generation: 0 };
+        assert_eq!(store.generation(), 1);
+    }
+}
