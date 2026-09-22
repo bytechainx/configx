@@ -160,6 +160,24 @@ fn next_generation(state: &WatchState) -> ConfigxResult<u64> {
 }
 
 /// 订阅句柄：记录已观察到的 generation，并可阻塞等待更新。
+///
+/// # 阻塞调用
+///
+/// 本类型的所有等待方法均为**同步阻塞**实现（基于 `std::sync::Condvar` 与
+/// `std::thread::sleep`），不依赖异步运行时，因此**不应在 tokio 异步上下文中
+/// 直接调用**。若必须从异步上下文中等待，请用 `tokio::task::spawn_blocking` 隔离：
+///
+/// ```ignore
+/// # use configx::{ConfigWatch, ConfigSubscription};
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # fn example(watch: Arc<ConfigWatch>) {
+/// let mut sub = watch.subscribe();
+/// let outcome = tokio::task::spawn_blocking(move || {
+///     sub.wait_timeout_outcome(Duration::from_secs(30))
+/// }).await??;
+/// # }
+/// ```
 pub struct ConfigSubscription {
     watch: Arc<ConfigWatch>,
     seen: u64,
@@ -204,6 +222,13 @@ impl ConfigSubscription {
     ///
     /// 状态锁只用 `try_lock` 读取，竞争不会造成无界阻塞；每次轮询 sleep 至多 1ms，
     /// 且始终受「调用开始时刻 + timeout」约束。
+    ///
+    /// # 阻塞调用
+    ///
+    /// 内部使用 `std::thread::sleep` 实现轮询等待。在 tokio 异步上下文中直接调用会
+    /// **冻结当前 OS 线程**，阻止运行时调度其他任务。在单线程运行时
+    /// （`current_thread`）下尤为致命：所有并发任务被阻塞，直至本方法返回。
+    /// 若必须从异步上下文等待，请用 `tokio::task::spawn_blocking` 隔离。
     ///
     /// # Errors
     ///

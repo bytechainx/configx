@@ -44,6 +44,10 @@
 //! - **失败不改状态**：源加载或校验失败时，快照与变更序号保持原样。
 //! - **读取永不脱敏**：脱敏只作用于 `Debug`/日志路径，[`ConfigxStore::get`] 始终返回原始值。
 //! - **纯同步**：变更通知基于 `Condvar`，不引入异步运行时，也不启动自动文件 watcher。
+//! - **异步互操作**：所有公开 API 均为同步阻塞实现。若在 tokio 异步上下文中调用，
+//!   必须用 `tokio::task::spawn_blocking` 隔离，否则会冻结运行时工作线程。
+//!   详见 [`ConfigSource::load`]、[`ConfigSubscription::wait_timeout_outcome`] 等
+//!   方法的文档中的 `# 阻塞调用` 小节。
 //!
 //! ## 非目标
 //!
