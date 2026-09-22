@@ -8,6 +8,19 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-23
+
+### 修正
+
+- **错误消息不再回显配置值**（`ConfigxConfig::from_toml`）：原先直接透传 `toml` 的类型
+  错误文本，会把非法**值**内联进消息（实测
+  `invalid type: string "…", expected a boolean`），违反 `src/error.rs` 声明的
+  「所有变体的消息都不得回显配置值」；`Display` 版本还会额外渲染源码行。
+  现改为只报告位置（`第 N 行第 M 列`），不透传底层文本、不渲染源码片段。
+  属**「实现向契约靠拢」**的 PATCH 修复，无公开 API 变更。
+  （由 `tests/aidd_boundary.rs::error_messages_never_echo_values` 补上 TOML 路径的
+  回显断言后先红后绿逼出。）
+
 ### 新增
 
 - 三类测试（特性 002）：`tests/tdd_contracts.rs`（逐公开入口的行为契约与变异探测红绿）、

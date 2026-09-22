@@ -29,7 +29,7 @@ pub enum ErrorKind {
 /// # 错误消息与敏感数据
 ///
 /// 所有变体的消息都不得回显配置值：类型转换失败只报告键名与目标类型名，
-/// TOML 解析失败只报告 `toml` 的错误摘要（不含源码片段），
+/// TOML 解析失败只报告位置（第 N 行第 M 列，不含配置值与源码片段），
 /// `KEY=VALUE` 解析失败只报告行号。这样才能安全地把错误写入日志。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

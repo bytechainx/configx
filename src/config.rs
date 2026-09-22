@@ -83,13 +83,18 @@ impl ConfigxConfig {
     ///
     /// 未出现的字段使用各自默认值；未知字段被忽略（向前兼容）。
     ///
+    /// # 错误消息
+    ///
+    /// 解析失败的消息**只报告位置**（第 N 行第 M 列）与固定类别文本，
+    /// **不含**配置值字节，也不渲染源码片段——见 [`ConfigxError`] 顶部的脱敏约定。
+    ///
     /// # Errors
     ///
     /// TOML 语法/类型错误返回 [`ConfigxError::Parse`]；解析成功但未通过
     /// [`validate`](Self::validate) 时返回 [`ConfigxError::Invalid`]。
     pub fn from_toml(text: &str) -> ConfigxResult<Self> {
         let config: Self = toml::from_str(text)
-            .map_err(|error| ConfigxError::parse(format!("TOML 解析失败：{}", error.message())))?;
+            .map_err(|error| ConfigxError::parse(describe_toml_failure(text, &error)))?;
         config.validate()?;
         Ok(config)
     }
@@ -159,6 +164,38 @@ impl ConfigxConfigBuilder {
         self.config.validate()?;
         Ok(self.config)
     }
+}
+
+/// 把 `toml` 的解析失败压成**不含配置值**的摘要。
+///
+/// 不能直接透传 `toml::de::Error` 的文本：`message()` 会把非法值内联进消息
+/// （实测 `invalid type: string "…", expected a boolean`），`Display` 还会额外渲染
+/// 源码行。两者都违反 [`ConfigxError`] 的「所有变体的消息都不得回显配置值」。
+/// 这里只保留**位置**（由 `span()` 换算的行/列），其余一概不输出。
+fn describe_toml_failure(text: &str, error: &toml::de::Error) -> String {
+    match error.span() {
+        Some(span) => {
+            let (line, column) = line_and_column(text, span.start);
+            format!("TOML 解析失败：第 {line} 行第 {column} 列")
+        }
+        None => "TOML 解析失败：文档格式不合法".to_string(),
+    }
+}
+
+/// 把字节偏移换算成 1-based 的（行号，列号）；列按字符计数。
+///
+/// 偏移可能落在多字节字符内部（或被越界传入），一律向前退到字符边界，
+/// 保证切片安全。
+fn line_and_column(text: &str, byte_offset: usize) -> (usize, usize) {
+    let mut offset = byte_offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &text[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    let column = text[line_start..offset].chars().count() + 1;
+    (line, column)
 }
 
 /// 读取环境变量；未设置或仅含空白时返回 `None`。
@@ -280,23 +317,50 @@ mod tests {
     }
 
     #[test]
-    fn from_toml_parse_error_uses_summary_without_source_snippet() {
-        // 契约（`src/error.rs` 顶部文档）：TOML 解析失败只报告 `toml` 的错误摘要，
-        // **不渲染源码片段**（即不含 `|` 行号块与原始 `key = value` 行）。
-        let error = ConfigxConfig::from_toml("redact_secrets = \"MARKER_LEAK_PROBE\"\n")
+    fn from_toml_parse_error_reports_position_without_value_or_source() {
+        // 契约（`src/error.rs` 顶部文档）：解析失败的消息**不得回显配置值**，
+        // 也不得渲染源码片段；只保留位置。
+        let probe = "MARKER_LEAK_PROBE";
+        let error = ConfigxConfig::from_toml(&format!("redact_secrets = \"{probe}\"\n"))
             .expect_err("类型错误必须报错");
         assert_eq!(error.kind(), ErrorKind::Parse);
         let rendered = error.to_string();
+        assert!(!rendered.contains(probe), "不得回显配置值：{rendered}");
         assert!(
             !rendered.contains("redact_secrets ="),
             "不得回显源码行：{rendered}"
         );
         assert!(!rendered.contains(" |"), "不得渲染行号块：{rendered}");
+        assert!(rendered.contains("第 1 行"), "应保留位置信息：{rendered}");
+    }
 
-        // 已实测并上报的偏差（本测试不冻结该行为）：`toml::Error::message()` 会把非法**值**
-        // 内联进摘要，形如 `invalid type: string "MARKER_LEAK_PROBE", expected a boolean`，
-        // 与 `src/error.rs` 的「所有变体的消息都不得回显配置值」不一致。
-        // configx 的配置字段当前只有布尔量，泄漏面有限；处置方式待 team-lead 裁定。
+    #[test]
+    fn syntax_error_also_omits_value_and_reports_position() {
+        // 语法错误（缺值）走同一条映射：同样不带值、不渲染片段。
+        let error = ConfigxConfig::from_toml("redact_secrets = \n").expect_err("语法错误必须报错");
+        assert_eq!(error.kind(), ErrorKind::Parse);
+        let rendered = error.to_string();
+        assert!(
+            rendered.starts_with("解析失败: TOML 解析失败："),
+            "{rendered}"
+        );
+        assert!(rendered.contains("第 1 行"), "应保留位置信息：{rendered}");
+    }
+
+    #[test]
+    fn line_and_column_maps_offsets_to_1_based_positions() {
+        let text = "a\nbb\nccc\n";
+        assert_eq!(line_and_column(text, 0), (1, 1));
+        assert_eq!(line_and_column(text, 2), (2, 1));
+        assert_eq!(line_and_column(text, 5), (3, 1));
+        assert_eq!(line_and_column(text, 8), (3, 4), "第三行末尾（换行符前）");
+        assert_eq!(line_and_column(text, 9), (4, 1), "文本末尾之后");
+
+        // 列按字符计数，而不是字节。
+        assert_eq!(line_and_column("中=1", 3), (1, 2));
+        // 偏移落在多字节字符内部或越界时，安全退到字符边界。
+        assert_eq!(line_and_column("中", 1), (1, 1));
+        assert_eq!(line_and_column("中", 99), (1, 2));
     }
 
     #[test]
