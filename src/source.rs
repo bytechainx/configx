@@ -254,3 +254,283 @@ pub fn parse_key_value_file(text: &str) -> ConfigxResult<HashMap<String, String>
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+    use crate::ErrorKind;
+
+    /// 唯一化临时文件路径（pid + 纳秒 + tag），避免并发用例互相覆盖。
+    fn unique_temp_path(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "configx-src-test-{}-{}-{nanos}.kv",
+            std::process::id(),
+            tag
+        ))
+    }
+
+    #[test]
+    fn memory_source_round_trips_pairs() {
+        assert!(MemorySource::new()
+            .load()
+            .expect("空源必须可加载")
+            .is_empty());
+
+        let source = MemorySource::from_pairs([("a", "1"), ("b", "2")]);
+        let loaded = source.load().expect("加载成功");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.get("a").map(String::as_str), Some("1"));
+        assert_eq!(loaded.get("b").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn memory_source_load_returns_an_independent_copy() {
+        let source = MemorySource::from_pairs([("a", "1")]);
+        let mut first = source.load().expect("加载成功");
+        first.insert("a".to_string(), "mutated".to_string());
+        first.insert("extra".to_string(), "x".to_string());
+
+        let second = source.load().expect("再次加载");
+        assert_eq!(
+            second.get("a").map(String::as_str),
+            Some("1"),
+            "源内部状态不得被调用方改动"
+        );
+        assert!(!second.contains_key("extra"));
+    }
+
+    #[test]
+    fn memory_source_debug_is_always_redacted() {
+        let source =
+            MemorySource::from_pairs([("secret:token", "top-secret"), ("plain", "visible")]);
+        let rendered = format!("{source:?}");
+        assert!(rendered.starts_with("MemorySource"), "{rendered}");
+        assert!(
+            rendered.contains("***"),
+            "内存源 Debug 恒定脱敏：{rendered}"
+        );
+        assert!(!rendered.contains("top-secret"), "{rendered}");
+        assert!(rendered.contains("visible"), "非敏感值保持可读：{rendered}");
+    }
+
+    #[test]
+    fn env_source_exposes_prefix() {
+        assert_eq!(EnvSource::new("APP_").prefix(), "APP_");
+    }
+
+    #[test]
+    fn env_source_strips_prefix_and_skips_non_matching_keys() {
+        let loaded = EnvSource::new("APP_")
+            .load_from_iter([("APP_HOST", "h"), ("APP_PORT", "1"), ("OTHER", "x")])
+            .expect("加载成功");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.get("HOST").map(String::as_str), Some("h"));
+        assert_eq!(loaded.get("PORT").map(String::as_str), Some("1"));
+        assert!(!loaded.contains_key("OTHER"));
+    }
+
+    #[test]
+    fn env_source_is_case_sensitive_and_skips_prefix_only_key() {
+        let loaded = EnvSource::new("APP_")
+            .load_from_iter([("app_host", "h"), ("APP_", "empty")])
+            .expect("加载成功");
+        assert!(
+            loaded.is_empty(),
+            "大小写不匹配与前缀后为空者都必须跳过：{loaded:?}"
+        );
+    }
+
+    #[test]
+    fn env_source_with_empty_prefix_returns_nothing() {
+        let source = EnvSource::new("");
+        assert!(source
+            .load_from_iter([("ANY", "1")])
+            .expect("加载成功")
+            .is_empty());
+        assert!(
+            source.load().expect("生产路径加载成功").is_empty(),
+            "空前缀不得误吞整张环境变量表"
+        );
+    }
+
+    #[test]
+    fn env_source_load_reads_real_environment() {
+        // 注入真实进程环境变量，覆盖生产路径（含前缀剥离）。
+        let name = "CONFIGX_SOURCE_TEST_HOST";
+        std::env::set_var(name, "db.local");
+        let loaded = EnvSource::new("CONFIGX_SOURCE_TEST_")
+            .load()
+            .expect("加载成功");
+        std::env::remove_var(name);
+        assert_eq!(loaded.get("HOST").map(String::as_str), Some("db.local"));
+    }
+
+    #[test]
+    fn env_source_os_iter_accepts_unicode_entries() {
+        let loaded = EnvSource::new("APP_")
+            .load_from_os_iter([
+                (OsString::from("APP_HOST"), OsString::from("h")),
+                (OsString::from("OTHER"), OsString::from("x")),
+            ])
+            .expect("合法 Unicode 必须成功");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.get("HOST").map(String::as_str), Some("h"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_source_reports_non_unicode_key_and_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let bad_key = EnvSource::new("APP_")
+            .load_from_os_iter([(
+                OsString::from_vec(vec![0xff]),
+                OsString::from_vec(b"v".to_vec()),
+            )])
+            .expect_err("非 Unicode 键必须报错");
+        assert_eq!(bad_key.kind(), ErrorKind::Invalid);
+        assert!(bad_key.to_string().contains("键"), "实际消息：{bad_key}");
+
+        let bad_value = EnvSource::new("APP_")
+            .load_from_os_iter([(OsString::from("APP_K"), OsString::from_vec(vec![0xff]))])
+            .expect_err("非 Unicode 值必须报错");
+        assert_eq!(bad_value.kind(), ErrorKind::Invalid);
+        assert!(
+            bad_value.to_string().contains("值"),
+            "实际消息：{bad_value}"
+        );
+    }
+
+    #[test]
+    fn file_source_exposes_path_and_reads_file() {
+        let path = unique_temp_path("ok");
+        std::fs::write(&path, "# comment\nHOST=db.local\nPORT = 5432\n").expect("写夹具");
+        let source = FileSource::new(&path);
+        assert_eq!(source.path(), path.as_path());
+        let loaded = source.load().expect("读取成功");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.get("HOST").map(String::as_str), Some("db.local"));
+        assert_eq!(loaded.get("PORT").map(String::as_str), Some("5432"));
+    }
+
+    #[test]
+    fn file_source_missing_file_reports_io_error_with_path() {
+        let path = unique_temp_path("missing");
+        let error = FileSource::new(&path).load().expect_err("缺失文件必须报错");
+        assert_eq!(
+            error.kind(),
+            ErrorKind::Invalid,
+            "文件缺失需人工修复，不可重试"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&path.display().to_string()),
+            "应报告路径：{rendered}"
+        );
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "必须保留底层 I/O 错误"
+        );
+    }
+
+    #[test]
+    fn file_source_propagates_parse_error() {
+        let path = unique_temp_path("bad");
+        std::fs::write(&path, "NOT_A_PAIR\n").expect("写夹具");
+        let error = FileSource::new(&path).load().expect_err("解析失败必须报错");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(error.kind(), ErrorKind::Invalid);
+        assert!(error.to_string().contains("第 1 行"), "实际消息：{error}");
+    }
+
+    #[test]
+    fn parse_skips_blank_and_comment_lines() {
+        let parsed = parse_key_value_file("\n  \n# comment\n#\nA=1\n").expect("解析成功");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.get("A").map(String::as_str), Some("1"));
+        assert!(parse_key_value_file("").expect("空文本可解析").is_empty());
+    }
+
+    #[test]
+    fn parse_trims_key_and_value() {
+        let parsed = parse_key_value_file("  KEY  =  value with spaces  \n").expect("解析成功");
+        assert_eq!(
+            parsed.get("KEY").map(String::as_str),
+            Some("value with spaces")
+        );
+    }
+
+    #[test]
+    fn parse_strips_exactly_one_layer_of_matching_quotes() {
+        let parsed =
+            parse_key_value_file("D=\"quoted\"\nS='single'\nN=\"'inner'\"\n").expect("解析成功");
+        assert_eq!(parsed.get("D").map(String::as_str), Some("quoted"));
+        assert_eq!(parsed.get("S").map(String::as_str), Some("single"));
+        assert_eq!(
+            parsed.get("N").map(String::as_str),
+            Some("'inner'"),
+            "只去一层引号"
+        );
+    }
+
+    #[test]
+    fn parse_keeps_unmatched_or_single_quotes_verbatim() {
+        let parsed = parse_key_value_file("A=\"x\nB=x\"\nC=\"\n").expect("解析成功");
+        assert_eq!(parsed.get("A").map(String::as_str), Some("\"x"));
+        assert_eq!(parsed.get("B").map(String::as_str), Some("x\""));
+        assert_eq!(parsed.get("C").map(String::as_str), Some("\""));
+    }
+
+    #[test]
+    fn parse_allows_arbitrary_key_characters_and_keeps_inner_equals() {
+        let parsed = parse_key_value_file("a.b-c/MIXED=1\nurl=http://x/?a=b\n").expect("解析成功");
+        assert_eq!(parsed.get("a.b-c/MIXED").map(String::as_str), Some("1"));
+        assert_eq!(
+            parsed.get("url").map(String::as_str),
+            Some("http://x/?a=b"),
+            "值中的 = 必须保留"
+        );
+    }
+
+    #[test]
+    fn parse_last_duplicate_key_wins() {
+        let parsed = parse_key_value_file("A=1\nA=2\n").expect("解析成功");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.get("A").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn parse_reports_line_number_without_echoing_content() {
+        let error =
+            parse_key_value_file("A=1\nSECRET_VALUE_WITHOUT_EQUALS\n").expect_err("缺 = 必须报错");
+        assert_eq!(error.kind(), ErrorKind::Invalid);
+        let rendered = error.to_string();
+        assert!(rendered.contains("第 2 行"), "应报告行号：{rendered}");
+        assert!(
+            !rendered.contains("SECRET_VALUE_WITHOUT_EQUALS"),
+            "不得回显原始行：{rendered}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_key_with_line_number() {
+        let error = parse_key_value_file("=value\n").expect_err("空键必须报错");
+        assert_eq!(error.kind(), ErrorKind::Invalid);
+        let rendered = error.to_string();
+        assert!(rendered.contains("第 1 行"), "实际消息：{rendered}");
+        assert!(rendered.contains("键为空"), "实际消息：{rendered}");
+        assert!(!rendered.contains("value"), "不得回显值：{rendered}");
+    }
+}

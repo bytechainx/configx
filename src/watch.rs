@@ -304,3 +304,263 @@ fn observe(seen: &mut u64, state: &WatchState) -> Option<ConfigWaitOutcome> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )]
+
+    use super::*;
+    use crate::ErrorKind;
+
+    #[test]
+    fn new_watch_starts_at_generation_zero() {
+        let watch = Arc::new(ConfigWatch::new());
+        assert_eq!(watch.generation(), 0);
+        assert_eq!(watch.subscribe().seen(), 0);
+        assert_eq!(ConfigWatch::default().generation(), 0);
+        assert_eq!(format!("{watch:?}"), "ConfigWatch { generation: 0 }");
+    }
+
+    #[test]
+    fn notify_increments_generation_monotonically() {
+        let watch = Arc::new(ConfigWatch::new());
+        assert_eq!(
+            watch.notify().expect("通知成功"),
+            ConfigChange { generation: 1 }
+        );
+        assert_eq!(
+            watch.notify().expect("通知成功"),
+            ConfigChange { generation: 2 }
+        );
+        assert_eq!(watch.generation(), 2);
+        assert_eq!(
+            format!("{watch:?}"),
+            "ConfigWatch { generation: 2 }",
+            "Debug 只报告 generation"
+        );
+    }
+
+    #[test]
+    fn wait_outcome_observes_change_after_notify() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        assert_eq!(subscription.seen(), 0);
+
+        watch.notify().expect("通知成功");
+        let outcome = subscription.wait_outcome().expect("等待成功");
+        assert_eq!(
+            outcome,
+            ConfigWaitOutcome::Changed(ConfigChange { generation: 1 })
+        );
+        assert_eq!(subscription.seen(), 1, "观察到变更后 seen 前移");
+    }
+
+    #[test]
+    fn observe_skips_straight_to_the_latest_generation() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        for _ in 0..3 {
+            watch.notify().expect("通知成功");
+        }
+        assert_eq!(
+            subscription.wait_outcome().expect("等待成功"),
+            ConfigWaitOutcome::Changed(ConfigChange { generation: 3 })
+        );
+        assert_eq!(subscription.seen(), 3);
+    }
+
+    #[test]
+    fn wait_returns_the_change_value() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        watch.notify().expect("通知成功");
+        assert_eq!(
+            subscription.wait().expect("等待成功"),
+            Some(ConfigChange { generation: 1 })
+        );
+    }
+
+    #[test]
+    fn close_reports_closed_to_waiters() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        watch.close().expect("关闭成功");
+
+        assert_eq!(
+            subscription.wait_outcome().expect("等待成功"),
+            ConfigWaitOutcome::Closed
+        );
+        assert_eq!(
+            subscription
+                .wait_timeout_outcome(Duration::from_millis(50))
+                .expect("等待成功"),
+            ConfigWaitOutcome::Closed
+        );
+    }
+
+    #[test]
+    fn notify_after_close_is_a_conflict() {
+        let watch = Arc::new(ConfigWatch::new());
+        watch.close().expect("关闭成功");
+        let error = watch.notify().expect_err("关闭后不得再通知");
+        assert_eq!(error.kind(), ErrorKind::Conflict);
+        assert!(error.to_string().contains("关闭"), "实际消息：{error}");
+    }
+
+    #[test]
+    fn compatibility_wait_apis_fold_timeout_and_closed_into_none() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        assert_eq!(
+            subscription
+                .wait_timeout(Duration::from_millis(5))
+                .expect("等待成功"),
+            None,
+            "超时折叠为 None"
+        );
+
+        watch.close().expect("关闭成功");
+        assert_eq!(
+            subscription.wait().expect("等待成功"),
+            None,
+            "关闭折叠为 None"
+        );
+    }
+
+    #[test]
+    fn real_timeout_wait_returns_change_when_generation_advanced() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        watch.notify().expect("通知成功");
+        assert_eq!(
+            subscription
+                .wait_timeout(Duration::from_millis(50))
+                .expect("等待成功"),
+            Some(ConfigChange { generation: 1 })
+        );
+    }
+
+    #[test]
+    fn concurrent_notify_unblocks_a_real_waiter() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        let notifier = Arc::clone(&watch);
+
+        let handle = thread::spawn(move || notifier.notify().expect("后台通知成功"));
+        let outcome = subscription.wait_outcome().expect("等待成功");
+        handle.join().expect("后台线程必须正常结束");
+
+        assert_eq!(
+            outcome,
+            ConfigWaitOutcome::Changed(ConfigChange { generation: 1 })
+        );
+    }
+
+    #[test]
+    fn injected_clock_reaches_deadline_and_reports_timeout() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+
+        let mut now = Duration::ZERO;
+        let outcome = subscription
+            .wait_timeout_outcome_with(
+                Duration::from_millis(3),
+                || {
+                    now += Duration::from_millis(1);
+                    now
+                },
+                |_| {},
+            )
+            .expect("等待成功");
+        assert_eq!(outcome, ConfigWaitOutcome::TimedOut);
+    }
+
+    #[test]
+    fn injected_clock_reports_change_without_sleeping() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        watch.notify().expect("通知成功");
+
+        let mut sleep_calls = 0usize;
+        let outcome = subscription
+            .wait_timeout_outcome_with(
+                Duration::from_secs(60),
+                || Duration::ZERO,
+                |_| sleep_calls += 1,
+            )
+            .expect("等待成功");
+        assert_eq!(
+            outcome,
+            ConfigWaitOutcome::Changed(ConfigChange { generation: 1 })
+        );
+        assert_eq!(sleep_calls, 0, "已就绪的变更不应 sleep");
+        assert_eq!(subscription.seen(), 1);
+    }
+
+    #[test]
+    fn injected_clock_reports_closed_before_pending_change() {
+        let watch = Arc::new(ConfigWatch::new());
+        let mut subscription = watch.subscribe();
+        watch.notify().expect("通知成功");
+        watch.close().expect("关闭成功");
+
+        let outcome = subscription
+            .wait_timeout_outcome_with(Duration::from_secs(60), || Duration::ZERO, |_| {})
+            .expect("等待成功");
+        assert_eq!(outcome, ConfigWaitOutcome::Closed, "关闭优先于未读变更");
+        assert_eq!(subscription.seen(), 0, "关闭不推进 seen");
+    }
+
+    #[test]
+    fn next_generation_reports_closed_and_overflow() {
+        let closed = WatchState {
+            generation: 5,
+            closed: true,
+        };
+        let error = next_generation(&closed).expect_err("已关闭必须报错");
+        assert_eq!(error.kind(), ErrorKind::Conflict);
+        assert!(error.to_string().contains("关闭"), "实际消息：{error}");
+
+        let maxed = WatchState {
+            generation: u64::MAX,
+            closed: false,
+        };
+        let error = next_generation(&maxed).expect_err("溢出必须报错");
+        assert_eq!(error.kind(), ErrorKind::Conflict);
+        assert!(error.to_string().contains("溢出"), "实际消息：{error}");
+
+        let normal = WatchState {
+            generation: 41,
+            closed: false,
+        };
+        assert_eq!(next_generation(&normal).expect("正常递增"), 42);
+    }
+
+    #[test]
+    fn observe_prefers_closed_and_tracks_seen() {
+        let mut seen = 0u64;
+
+        let closed = WatchState {
+            generation: 7,
+            closed: true,
+        };
+        assert_eq!(observe(&mut seen, &closed), Some(ConfigWaitOutcome::Closed));
+        assert_eq!(seen, 0, "关闭不推进 seen");
+
+        let open = WatchState {
+            generation: 7,
+            closed: false,
+        };
+        assert_eq!(
+            observe(&mut seen, &open),
+            Some(ConfigWaitOutcome::Changed(ConfigChange { generation: 7 }))
+        );
+        assert_eq!(seen, 7);
+        assert_eq!(observe(&mut seen, &open), None, "追平后不再返回结果");
+    }
+}
