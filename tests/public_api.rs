@@ -12,7 +12,7 @@ use configx::{
     is_secret_key, redact_map, redact_value, ConfigChange, ConfigDiff, ConfigSource,
     ConfigSubscription, ConfigWaitOutcome, ConfigWatch, ConfigxConfig, ConfigxConfigBuilder,
     ConfigxError, ConfigxHealth, ConfigxResult, ConfigxStore, EnvSource, ErrorKind, FileSource,
-    LayeredConfig, MemorySource,
+    GlobalFileSource, LayeredConfig, MemorySource,
 };
 
 fn assert_send_sync<T: Send + Sync>() {}
@@ -46,6 +46,7 @@ fn core_types_are_send_and_sync() {
     assert_send_sync::<MemorySource>();
     assert_send_sync::<EnvSource>();
     assert_send_sync::<FileSource>();
+    assert_send_sync::<GlobalFileSource>();
 }
 
 #[test]

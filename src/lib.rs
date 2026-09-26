@@ -13,7 +13,7 @@
 //! |----|-------------|
 //! | 存储门面 | [`ConfigxStore`]、[`ConfigxHealth`] |
 //! | 配置与构建器 | [`ConfigxConfig`]、[`ConfigxConfigBuilder`] |
-//! | 配置源 | [`ConfigSource`]、[`MemorySource`]、[`EnvSource`]、[`FileSource`]、[`parse_key_value_file`] |
+//! | 配置源 | [`ConfigSource`]、[`MemorySource`]、[`EnvSource`]、[`FileSource`]、[`GlobalFileSource`]、[`parse_key_value_file`]、[`resolve_global_file_path`] |
 //! | 多层合并 | [`LayeredConfig`]（后注册源覆盖先注册源） |
 //! | 变更通知 | [`ConfigWatch`]、[`ConfigSubscription`]、[`ConfigChange`]、[`ConfigWaitOutcome`] |
 //! | 快照视图 | [`diff_snapshots`]、[`ConfigDiff`]、[`subset_snapshot`]、[`try_subset_snapshot`]、[`snapshots_agree`] |
@@ -65,13 +65,17 @@ mod view;
 mod watch;
 
 pub use config::{
-    ConfigxConfig, ConfigxConfigBuilder, ENV_ALLOW_EMPTY_SNAPSHOT, ENV_REDACT_SECRETS,
+    ConfigxConfig, ConfigxConfigBuilder, ENV_ALLOW_EMPTY_SNAPSHOT, ENV_GLOBAL_FILE,
+    ENV_REDACT_SECRETS,
 };
 pub use diff::{diff_snapshots, ConfigDiff};
 pub use error::{ConfigxError, ConfigxResult, ErrorKind};
 pub use layered::LayeredConfig;
 pub use secret::{is_secret_key, redact_map, redact_value, REDACTED_VALUE, SECRET_KEY_PREFIX};
-pub use source::{parse_key_value_file, ConfigSource, EnvSource, FileSource, MemorySource};
+pub use source::{
+    parse_key_value_file, resolve_global_file_path, resolve_global_file_path_from_env,
+    ConfigSource, EnvSource, FileSource, GlobalFileSource, MemorySource,
+};
 pub use store::{ConfigxHealth, ConfigxStore};
 pub use view::{snapshots_agree, subset_snapshot, try_subset_snapshot};
 pub use watch::{ConfigChange, ConfigSubscription, ConfigWaitOutcome, ConfigWatch};
