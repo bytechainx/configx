@@ -226,5 +226,44 @@ fn assert_acceptance() {
     }
     // 测试面覆盖清单同样登记在文档中，避免文档与测试脱节。
     assert!(standard.contains("tests/public_api.rs"));
+    let version = package_version();
+    assert!(
+        standard.contains(&format!("v{version}")),
+        "docs/标准.md 必须声明与 Cargo.toml [package].version 一致的 v{{version}}"
+    );
+    let api = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/API.md"))
+        .expect("docs/API.md 必须存在");
+    assert!(
+        api.contains(&format!("configx {version}")),
+        "docs/API.md 必须声明与 Cargo.toml [package].version 一致的 configx {{version}}"
+    );
     let _ = std::env::current_dir().expect("可取得当前目录（验收命令可执行）");
+}
+
+fn package_version() -> String {
+    let cargo = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("Cargo.toml 必须存在");
+    let mut in_package = false;
+    for line in cargo.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_package = false;
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = trimmed.strip_prefix("version") {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let value = rest.trim().trim_matches('"');
+                    assert!(!value.is_empty(), "Cargo.toml [package].version 不得为空");
+                    return value.to_string();
+                }
+            }
+        }
+    }
+    panic!("Cargo.toml 缺少 [package].version");
 }
