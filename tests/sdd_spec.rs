@@ -11,13 +11,15 @@
 //! // SPEC-MAP: S-3 | 3. 并发与订阅 | assert_concurrency_and_subscription
 //! // SPEC-MAP: S-4 | 4. 配置治理 | assert_config_governance
 //! // SPEC-MAP: S-5 | 5. 验收 | assert_acceptance
+//! // SPEC-MAP: S-6 | 6. 全局配置文件 | assert_global_config_file
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use configx::{
-    ConfigSource, ConfigWaitOutcome, ConfigxConfig, ConfigxStore, ErrorKind, MemorySource,
-    ENV_ALLOW_EMPTY_SNAPSHOT, ENV_REDACT_SECRETS,
+    resolve_global_file_path_from_env, ConfigSource, ConfigWaitOutcome, ConfigxConfig,
+    ConfigxStore, ErrorKind, GlobalFileSource, MemorySource, ENV_ALLOW_EMPTY_SNAPSHOT,
+    ENV_GLOBAL_FILE, ENV_REDACT_SECRETS,
 };
 
 /// S-1：纯同步 crate——不引入异步运行时、不启动后台线程或文件 watcher；
@@ -238,6 +240,34 @@ fn assert_acceptance() {
         "docs/API.md 必须声明与 Cargo.toml [package].version 一致的 configx {{version}}"
     );
     let _ = std::env::current_dir().expect("可取得当前目录（验收命令可执行）");
+}
+
+/// S-6：可选全局 `KEY=VALUE` 文件；缺文件为空；不自动注册；密钥不从该文件注入。
+#[test]
+fn assert_global_config_file() {
+    use std::ffi::OsString;
+
+    let standard = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/标准.md"))
+        .expect("docs/标准.md 必须存在");
+    assert!(standard.contains("## 6. 全局配置文件"));
+    assert!(standard.contains("ENV_GLOBAL_FILE"));
+
+    let path = resolve_global_file_path_from_env(
+        "sddapp",
+        [(
+            OsString::from(ENV_GLOBAL_FILE),
+            OsString::from("/tmp/sdd-global.conf"),
+        )],
+    )
+    .unwrap();
+    assert_eq!(path.as_os_str(), "/tmp/sdd-global.conf");
+
+    let mut store = ConfigxStore::new();
+    store.register_source(GlobalFileSource::new(
+        std::env::temp_dir().join(format!("configx-sdd-global-absent-{}", std::process::id())),
+    ));
+    store.reload().unwrap();
+    assert!(store.is_empty(), "构造后不自动读家目录；缺文件贡献 0 键");
 }
 
 fn package_version() -> String {

@@ -8,6 +8,8 @@ use crate::error::{ConfigxError, ConfigxResult};
 pub const ENV_REDACT_SECRETS: &str = "FOUNDATIONX_CONFIGX_REDACT_SECRETS";
 /// 是否允许空快照（布尔）的环境变量名。
 pub const ENV_ALLOW_EMPTY_SNAPSHOT: &str = "FOUNDATIONX_CONFIGX_ALLOW_EMPTY_SNAPSHOT";
+/// 全局配置文件路径覆盖（非空则不再用 XDG/HOME + `app_id`）。
+pub const ENV_GLOBAL_FILE: &str = "FOUNDATIONX_CONFIGX_GLOBAL_FILE";
 
 fn default_redact_secrets() -> bool {
     true

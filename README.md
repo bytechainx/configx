@@ -81,7 +81,7 @@ assert_eq!(config, from_toml);
 - **层序**：源按注册顺序合并，后注册者优先级更高；先注册源独有的键保留。
 - **原子替换**：`reload()` 先完整加载并校验全部源，再整体替换快照，读取方只会看到旧快照或新快照。
 - **键不规范化**：键大小写敏感、按原样存储与查询；只拒绝空键、控制字符与超过 512 字节的键。
-- **配置源**：`MemorySource`（内存）、`EnvSource`（按前缀剥离环境变量）、`FileSource`（`KEY=VALUE` 文件），
+- **配置源**：`MemorySource`（内存）、`EnvSource`（按前缀剥离环境变量）、`FileSource`（`KEY=VALUE` 文件）、`GlobalFileSource`（可选全局文件，缺文件为空），
   也可自行实现 `ConfigSource`。
 - **健康检查**：`health_check()` 返回 `ConfigxHealth { sources, keys, healthy }`；
   `ping()` 在「至少一个源已成功加载」时返回 `Ok(())`，否则返回可重试的 `ConfigxError::Unavailable`。

@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 可选全局 `KEY=VALUE` 文件：`ENV_GLOBAL_FILE`、`resolve_global_file_path` / `resolve_global_file_path_from_env`、`GlobalFileSource`（缺文件为空；`secret:` 键使加载失败）。不自动注册，不改 `FileSource` 缺文件语义。
+
 ## [0.1.1] - 2026-09-23
 
 ### 修正
