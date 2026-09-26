@@ -20,15 +20,17 @@
 //! // TDD-PROBE: ConfigWatch::wait_timeout_outcome | 变异：等待恒定返回 Changed | 红=config_watch_wait_reports_change_timeout_and_closed | 绿=config_watch_wait_reports_change_timeout_and_closed
 //! // TDD-PROBE: redact_map | 变异：redact_map 返回原始映射 | 红=redact_map_masks_secret_prefixed_values | 绿=redact_map_masks_secret_prefixed_values
 //! // TDD-PROBE: is_secret_key | 变异：is_secret_key 取反 | 红=is_secret_key_is_prefix_based_and_case_sensitive | 绿=is_secret_key_is_prefix_based_and_case_sensitive
+//! // TDD-PROBE: resolve_global_file_path_from_env | 变异：覆盖变量被 HOME 抢先 | 红=resolve_global_file_path_override_wins | 绿=resolve_global_file_path_override_wins
+//! // TDD-PROBE: GlobalFileSource::load | 变异：缺文件当 I/O 失败 | 红=global_file_missing_is_empty_and_secret_keys_fail_reload | 绿=global_file_missing_is_empty_and_secret_keys_fail_reload
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use configx::{
-    is_secret_key, redact_map, ConfigSubscription, ConfigWaitOutcome, ConfigWatch, ConfigxConfig,
-    ConfigxStore, EnvSource, ErrorKind, FileSource, MemorySource, ENV_ALLOW_EMPTY_SNAPSHOT,
-    ENV_REDACT_SECRETS,
+    is_secret_key, redact_map, resolve_global_file_path_from_env, ConfigSource, ConfigSubscription,
+    ConfigWaitOutcome, ConfigWatch, ConfigxConfig, ConfigxStore, EnvSource, ErrorKind, FileSource,
+    GlobalFileSource, MemorySource, ENV_ALLOW_EMPTY_SNAPSHOT, ENV_GLOBAL_FILE, ENV_REDACT_SECRETS,
 };
 
 /// 环境变量是进程级共享状态：本文件的 env 用例必须串行。
@@ -277,4 +279,70 @@ fn is_secret_key_is_prefix_based_and_case_sensitive() {
         .unwrap();
     assert_eq!(loaded.get("HOST").map(String::as_str), Some("h"));
     assert!(!loaded.contains_key("OTHER"));
+}
+
+/// `resolve_global_file_path_from_env`：覆盖常量优先于 XDG/HOME。
+#[test]
+fn resolve_global_file_path_override_wins() {
+    use std::ffi::OsString;
+
+    let path = resolve_global_file_path_from_env(
+        "app",
+        [
+            (
+                OsString::from(ENV_GLOBAL_FILE),
+                OsString::from("/explicit.conf"),
+            ),
+            (OsString::from("HOME"), OsString::from("/home/x")),
+        ],
+    )
+    .unwrap();
+    assert_eq!(path.as_os_str(), "/explicit.conf");
+
+    let missing = resolve_global_file_path_from_env("ok", []).unwrap_err();
+    assert_eq!(missing.kind(), ErrorKind::Invalid);
+}
+
+/// `GlobalFileSource::load`：缺文件为空；`secret:` 使 reload 失败且不改状态。
+#[test]
+fn global_file_missing_is_empty_and_secret_keys_fail_reload() {
+    let missing = std::env::temp_dir().join(format!(
+        "configx-tdd-global-missing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+    let mut store = ConfigxStore::new();
+    store.register_source(GlobalFileSource::new(&missing));
+    store.reload().unwrap();
+    assert!(store.is_empty());
+    let generation = store.generation();
+
+    FileSource::new(&missing)
+        .load()
+        .expect_err("FileSource 缺文件必须仍失败");
+
+    let secret_path = std::env::temp_dir().join(format!(
+        "configx-tdd-global-secret-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&secret_path, "secret:token=hidden\n").unwrap();
+    let mut blocked = ConfigxStore::new();
+    blocked.register_source(MemorySource::from_pairs([("keep", "1")]));
+    blocked.reload().unwrap();
+    let before = blocked.generation();
+    blocked.register_source(GlobalFileSource::new(&secret_path));
+    let error = blocked.reload().unwrap_err();
+    let _ = std::fs::remove_file(&secret_path);
+    assert_eq!(error.kind(), ErrorKind::Invalid);
+    assert!(!error.to_string().contains("hidden"));
+    assert_eq!(blocked.generation(), before);
+    assert_eq!(blocked.get("keep"), Some("1"));
+    let _ = generation;
 }

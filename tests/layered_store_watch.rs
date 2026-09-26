@@ -12,7 +12,7 @@ use std::time::Duration;
 use configx::{
     diff_snapshots, parse_key_value_file, snapshots_agree, subset_snapshot, try_subset_snapshot,
     ConfigChange, ConfigSource, ConfigWaitOutcome, ConfigxConfig, ConfigxStore, EnvSource,
-    ErrorKind, FileSource, LayeredConfig, MemorySource,
+    ErrorKind, FileSource, GlobalFileSource, LayeredConfig, MemorySource,
 };
 
 #[test]
@@ -288,4 +288,24 @@ fn concurrent_reads_from_shared_store_are_safe() {
     for handle in handles {
         handle.join().unwrap();
     }
+}
+
+#[test]
+fn global_file_then_memory_overrides() {
+    let path = std::env::temp_dir().join(format!(
+        "configx-layered-global-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&path, "k=file\nonly_file=1\n").unwrap();
+    let mut store = ConfigxStore::new();
+    store.register_source(GlobalFileSource::new(&path));
+    store.register_source(MemorySource::from_pairs([("k", "mem")]));
+    store.reload().unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(store.get("k"), Some("mem"));
+    assert_eq!(store.get("only_file"), Some("1"));
 }

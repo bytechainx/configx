@@ -7,8 +7,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::ENV_GLOBAL_FILE;
 use crate::error::{ConfigxError, ConfigxResult};
-use crate::secret::RedactedHashMap;
+use crate::secret::{is_secret_key, RedactedHashMap};
 
 /// 可加载配置条目的源。
 ///
@@ -208,6 +209,137 @@ impl ConfigSource for FileSource {
             )
         })?;
         parse_key_value_file(&text)
+    }
+}
+
+const MAX_APP_ID_BYTES: usize = 64;
+
+fn validate_app_id(app_id: &str) -> ConfigxResult<()> {
+    if app_id.is_empty() {
+        return Err(ConfigxError::invalid("app_id 不能为空"));
+    }
+    if app_id.len() > MAX_APP_ID_BYTES {
+        return Err(ConfigxError::invalid("app_id 长度超过 64 字节"));
+    }
+    if app_id.chars().any(char::is_control) {
+        return Err(ConfigxError::invalid("app_id 不能包含控制字符"));
+    }
+    if app_id.contains('/') || app_id.contains('\\') {
+        return Err(ConfigxError::invalid("app_id 不能包含路径分隔符"));
+    }
+    if app_id.contains("..") {
+        return Err(ConfigxError::invalid("app_id 不能包含 .."));
+    }
+    Ok(())
+}
+
+/// 按进程环境解析全局配置文件路径。
+///
+/// 规则见 [`resolve_global_file_path_from_env`]。
+pub fn resolve_global_file_path(app_id: &str) -> ConfigxResult<PathBuf> {
+    resolve_global_file_path_from_env(app_id, env::vars_os())
+}
+
+/// 从给定环境映射解析全局配置文件路径（供测试注入）。
+///
+/// 优先 [`ENV_GLOBAL_FILE`] 的非空 trim 值；否则
+/// `{XDG_CONFIG_HOME}/{app_id}/config` 或 `{HOME}/.config/{app_id}/config`。
+///
+/// # Errors
+///
+/// `app_id` 非法，或没有覆盖变量且缺少 `XDG_CONFIG_HOME` 与 `HOME`。
+pub fn resolve_global_file_path_from_env(
+    app_id: &str,
+    vars: impl IntoIterator<Item = (OsString, OsString)>,
+) -> ConfigxResult<PathBuf> {
+    let mut map = HashMap::<String, String>::new();
+    for (key, value) in vars {
+        let Ok(key) = key.into_string() else {
+            continue;
+        };
+        let Ok(value) = value.into_string() else {
+            continue;
+        };
+        map.insert(key, value);
+    }
+
+    if let Some(raw) = map.get(ENV_GLOBAL_FILE) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
+    validate_app_id(app_id)?;
+
+    if let Some(xdg) = map
+        .get("XDG_CONFIG_HOME")
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+    {
+        return Ok(PathBuf::from(xdg).join(app_id).join("config"));
+    }
+    if let Some(home) = map
+        .get("HOME")
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+    {
+        return Ok(PathBuf::from(home)
+            .join(".config")
+            .join(app_id)
+            .join("config"));
+    }
+
+    Err(ConfigxError::invalid(
+        "无法解析全局配置文件路径：未设置覆盖变量且缺少 XDG_CONFIG_HOME 与 HOME",
+    ))
+}
+
+/// 可选全局 `KEY=VALUE` 文件源：文件不存在视为空映射；含 `secret:` 键则失败。
+///
+/// 不创建、不改写、不监视文件。调用方须显式 [`crate::ConfigxStore::register_source`]。
+///
+/// # 阻塞调用
+///
+/// `load()` 在文件存在时使用阻塞 `std::fs::read_to_string`。
+#[derive(Debug, Clone)]
+pub struct GlobalFileSource {
+    path: PathBuf,
+}
+
+impl GlobalFileSource {
+    /// 指定已解析的全局文件路径。
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// 路径。
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl ConfigSource for GlobalFileSource {
+    fn load(&self) -> ConfigxResult<HashMap<String, String>> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HashMap::new());
+            }
+            Err(error) => {
+                return Err(ConfigxError::io(
+                    format!("读取全局配置文件失败：路径={}", self.path.display()),
+                    error,
+                ));
+            }
+        };
+        let loaded = parse_key_value_file(&text)?;
+        if loaded.keys().any(|key| is_secret_key(key)) {
+            return Err(ConfigxError::invalid("全局配置文件不得包含 secret: 前缀键"));
+        }
+        Ok(loaded)
     }
 }
 
@@ -532,5 +664,73 @@ mod tests {
         assert!(rendered.contains("第 1 行"), "实际消息：{rendered}");
         assert!(rendered.contains("键为空"), "实际消息：{rendered}");
         assert!(!rendered.contains("value"), "不得回显值：{rendered}");
+    }
+
+    #[test]
+    fn resolve_global_prefers_override_and_ignores_home() {
+        let path = resolve_global_file_path_from_env(
+            "app",
+            [
+                (
+                    OsString::from(ENV_GLOBAL_FILE),
+                    OsString::from("/tmp/g.conf"),
+                ),
+                (OsString::from("HOME"), OsString::from("/home/x")),
+                (OsString::from("XDG_CONFIG_HOME"), OsString::from("/xdg")),
+            ],
+        )
+        .expect("覆盖变量必须赢");
+        assert_eq!(path, PathBuf::from("/tmp/g.conf"));
+    }
+
+    #[test]
+    fn resolve_global_blank_override_falls_through_to_xdg() {
+        let path = resolve_global_file_path_from_env(
+            "myapp",
+            [
+                (OsString::from(ENV_GLOBAL_FILE), OsString::from("  ")),
+                (OsString::from("XDG_CONFIG_HOME"), OsString::from("/xdg")),
+            ],
+        )
+        .expect("空白覆盖视为未设");
+        assert_eq!(path, PathBuf::from("/xdg/myapp/config"));
+    }
+
+    #[test]
+    fn resolve_global_uses_home_dot_config() {
+        let path = resolve_global_file_path_from_env(
+            "myapp",
+            [(OsString::from("HOME"), OsString::from("/home/x"))],
+        )
+        .expect("HOME 回退");
+        assert_eq!(path, PathBuf::from("/home/x/.config/myapp/config"));
+    }
+
+    #[test]
+    fn resolve_global_rejects_bad_app_id_and_missing_roots() {
+        let slash = resolve_global_file_path_from_env("a/b", []).expect_err("分隔符");
+        assert_eq!(slash.kind(), ErrorKind::Invalid);
+        let missing = resolve_global_file_path_from_env("ok", []).expect_err("无根");
+        assert_eq!(missing.kind(), ErrorKind::Invalid);
+        assert!(!missing.to_string().contains("ok"));
+    }
+
+    #[test]
+    fn global_file_source_missing_is_empty() {
+        let path = unique_temp_path("global-missing");
+        let loaded = GlobalFileSource::new(&path).load().expect("缺文件必须成功");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn global_file_source_rejects_secret_prefix_keys() {
+        let path = unique_temp_path("global-secret");
+        std::fs::write(&path, "host=local\nsecret:token=nope\n").expect("写夹具");
+        let error = GlobalFileSource::new(&path)
+            .load()
+            .expect_err("secret: 必须失败");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(error.kind(), ErrorKind::Invalid);
+        assert!(!error.to_string().contains("nope"));
     }
 }

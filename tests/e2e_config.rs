@@ -36,11 +36,13 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use configx::{
-    diff_snapshots, is_secret_key, parse_key_value_file, redact_map, redact_value, snapshots_agree,
-    subset_snapshot, try_subset_snapshot, ConfigChange, ConfigDiff, ConfigSource,
-    ConfigWaitOutcome, ConfigWatch, ConfigxConfig, ConfigxConfigBuilder, ConfigxError,
-    ConfigxHealth, ConfigxResult, ConfigxStore, EnvSource, ErrorKind, FileSource, LayeredConfig,
-    MemorySource, ENV_ALLOW_EMPTY_SNAPSHOT, ENV_REDACT_SECRETS, REDACTED_VALUE, SECRET_KEY_PREFIX,
+    diff_snapshots, is_secret_key, parse_key_value_file, redact_map, redact_value,
+    resolve_global_file_path, resolve_global_file_path_from_env, snapshots_agree, subset_snapshot,
+    try_subset_snapshot, ConfigChange, ConfigDiff, ConfigSource, ConfigWaitOutcome, ConfigWatch,
+    ConfigxConfig, ConfigxConfigBuilder, ConfigxError, ConfigxHealth, ConfigxResult, ConfigxStore,
+    EnvSource, ErrorKind, FileSource, GlobalFileSource, LayeredConfig, MemorySource,
+    ENV_ALLOW_EMPTY_SNAPSHOT, ENV_GLOBAL_FILE, ENV_REDACT_SECRETS, REDACTED_VALUE,
+    SECRET_KEY_PREFIX,
 };
 
 /// `FOUNDATIONX_CONFIGX_*` 前缀（本 crate 的环境变量命名空间）。
@@ -147,6 +149,11 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("type", "FileSource"),
     ("fn", "FileSource::new"),
     ("fn", "FileSource::path"),
+    ("type", "GlobalFileSource"),
+    ("fn", "GlobalFileSource::new"),
+    ("fn", "GlobalFileSource::path"),
+    ("fn", "resolve_global_file_path"),
+    ("fn", "resolve_global_file_path_from_env"),
     ("type", "LayeredConfig"),
     ("fn", "LayeredConfig::is_empty"),
     ("fn", "LayeredConfig::len"),
@@ -158,6 +165,7 @@ const E2E_MANIFEST: &[(&str, &str)] = &[
     ("fn", "MemorySource::from_pairs"),
     ("fn", "MemorySource::new"),
     ("const", "ENV_ALLOW_EMPTY_SNAPSHOT"),
+    ("const", "ENV_GLOBAL_FILE"),
     ("const", "ENV_REDACT_SECRETS"),
     ("const", "REDACTED_VALUE"),
     ("const", "SECRET_KEY_PREFIX"),
@@ -622,6 +630,30 @@ fn phase_file_plane() -> (PathBuf, PathBuf) {
         std::error::Error::source(&io_error).is_some(),
         "I/O 错误必须保留底层 source"
     );
+
+    hit("type", "GlobalFileSource");
+    let global_missing = GlobalFileSource::new(&absent_path);
+    hit("fn", "GlobalFileSource::new");
+    hit("fn", "GlobalFileSource::path");
+    assert_eq!(global_missing.path(), absent_path.as_path());
+    assert!(global_missing
+        .load()
+        .expect("全局源缺文件必须成功")
+        .is_empty());
+    hit("const", "ENV_GLOBAL_FILE");
+    assert!(ENV_GLOBAL_FILE.starts_with(CONFIGX_ENV_PREFIX));
+    hit("fn", "resolve_global_file_path_from_env");
+    let resolved = resolve_global_file_path_from_env(
+        "e2eapp",
+        [(
+            std::ffi::OsString::from(ENV_GLOBAL_FILE),
+            std::ffi::OsString::from("/tmp/e2e-global.conf"),
+        )],
+    )
+    .expect("覆盖路径必须可解析");
+    assert_eq!(resolved.as_os_str(), "/tmp/e2e-global.conf");
+    hit("fn", "resolve_global_file_path");
+    let _: fn(&str) -> ConfigxResult<std::path::PathBuf> = resolve_global_file_path;
 
     (dir, kv_path)
 }

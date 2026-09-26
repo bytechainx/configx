@@ -7,8 +7,8 @@
 | 面 | 类型 / 函数 | 说明 |
 |----|-------------|------|
 | 存储门面 | `ConfigxStore`、`ConfigxHealth` | `new` / `from_config` / `register_source` / `register_shared_source` / `with_source` / `reload` / `get` / `get_typed` / `contains_key` / `len` / `snapshot` / `ping` / `health_check` / `watch` / `subscribe` / `notifier` / `generation` |
-| 配置与构建器 | `ConfigxConfig`、`ConfigxConfigBuilder` | `from_env` / `from_toml` / `validate` / `builder`；开关：`redact_secrets`、`allow_empty_snapshot` |
-| 配置源 | `ConfigSource`（trait）、`MemorySource`、`EnvSource`、`FileSource`、`parse_key_value_file` | 内存键值对 / 带前缀的环境变量 / `KEY=VALUE` 文件 |
+| 配置与构建器 | `ConfigxConfig`、`ConfigxConfigBuilder` | `from_env` / `from_toml` / `validate` / `builder`；开关：`redact_secrets`、`allow_empty_snapshot`；`ENV_GLOBAL_FILE` |
+| 配置源 | `ConfigSource`（trait）、`MemorySource`、`EnvSource`、`FileSource`、`GlobalFileSource`、`parse_key_value_file`、`resolve_global_file_path` | 内存 / 环境 / 文件 / 可选全局文件 |
 | 多层合并 | `LayeredConfig` | 后注册源覆盖先注册源 |
 | 变更通知 | `ConfigWatch`、`ConfigSubscription`、`ConfigChange`、`ConfigWaitOutcome` | 基于 `Condvar` 的同步订阅，无异步运行时 |
 | 快照视图 | `diff_snapshots`、`ConfigDiff`、`subset_snapshot`、`try_subset_snapshot`、`snapshots_agree` | 差异比较与子集视图 |
