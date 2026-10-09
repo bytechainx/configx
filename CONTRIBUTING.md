@@ -72,7 +72,7 @@ cargo bench --bench hot_path -- --quick
 - **读取永不脱敏**：`ConfigxStore::get` 始终返回原始值，脱敏只作用于 `Debug` / 日志路径。
 - **纯同步**：变更通知基于 `Condvar`，不要引入异步运行时或后台文件 watcher；
   非目标（类型化 schema、分布式配置中心、远端 secret manager、自动文件监听）不要顺手加。
-- MSRV 为 `1.75`，edition 2021（与 `Cargo.toml` 声明一致，不要使用更新的语言特性）。
+- MSRV 为 `1.85`，edition 2021（与 `Cargo.toml` 声明一致，不要使用更新的语言特性）。
 
 ## 提交前自检清单
 
