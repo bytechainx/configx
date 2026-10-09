@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+### 破坏性变更
+
+- MSRV 由 `1.75` 上调至 `1.85`：依赖链中的 `hashbrown 0.17.1`（经 `indexmap`）
+  使用 edition 2024，要求 Cargo ≥ 1.85，原声明值不可满足。同时入库 `Cargo.lock`
+  并新增 `deny.toml`（供应链可重现，见组织基线 `R-SEC-009` / `R-DEP-005`）。
+
 ### 新增
 
 - 可选全局 `KEY=VALUE` 文件：`ENV_GLOBAL_FILE`、`resolve_global_file_path` / `resolve_global_file_path_from_env`、`GlobalFileSource`（缺文件为空；`secret:` 键使加载失败）。不自动注册，不改 `FileSource` 缺文件语义。

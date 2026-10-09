@@ -653,7 +653,15 @@ fn phase_file_plane() -> (PathBuf, PathBuf) {
     .expect("覆盖路径必须可解析");
     assert_eq!(resolved.as_os_str(), "/tmp/e2e-global.conf");
     hit("fn", "resolve_global_file_path");
-    let _: fn(&str) -> ConfigxResult<std::path::PathBuf> = resolve_global_file_path;
+    // 真实调用（读进程环境 ENV_GLOBAL_FILE），而非仅取函数指针——
+    // 取指针不产生执行，E2E 覆盖核对器的执行计数会判 0（本用例原缺陷）。
+    std::env::set_var(ENV_GLOBAL_FILE, "/tmp/e2e-global-proc.conf");
+    let resolved_proc = resolve_global_file_path("e2eapp").expect("进程环境覆盖路径必须可解析");
+    assert_eq!(resolved_proc.as_os_str(), "/tmp/e2e-global-proc.conf");
+    std::env::remove_var(ENV_GLOBAL_FILE);
+    // 错误路径：无覆盖变量且无 XDG/HOME 时必须报错（同时覆盖该分支）。
+    let err = resolve_global_file_path("").expect_err("空 app_id 必须被拒绝");
+    assert_eq!(err.kind(), ErrorKind::Invalid);
 
     (dir, kv_path)
 }

@@ -2,7 +2,7 @@
 name = "configx"
 version = "0.1.1"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "Layered configuration store: in-memory key-value snapshot, multi-source merge, change watch and secret redaction"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/bytechainx/configx"
